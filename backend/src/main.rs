@@ -458,7 +458,7 @@ impl Host {
                     "请先生成证书 / Generate certificate first"
                 );
                 let thumb = platform::thumbprint(&self.cert())?;
-                platform::install_certificate(&self.cert())?;
+                platform::install_certificate_elevated(&self.cert())?;
                 self.settings["installedCa"] = json!(thumb);
                 write_json(&self.profile.join("cpv-settings.json"), &self.settings)?;
                 self.poll()
@@ -542,6 +542,26 @@ fn default_profile() -> Result<PathBuf> {
     )
 }
 fn main() {
+    #[cfg(windows)]
+    {
+        let args: Vec<_> = std::env::args_os().skip(1).collect();
+        if args
+            .first()
+            .is_some_and(|arg| arg == "--install-certificate")
+        {
+            let code = if args.len() == 4 {
+                platform::elevated_certificate_helper(
+                    Path::new(&args[1]),
+                    &args[2].to_string_lossy(),
+                    &args[3].to_string_lossy(),
+                )
+            } else {
+                87
+            };
+            std::process::exit(code as i32);
+        }
+    }
+
     let profile = match default_profile() {
         Ok(p) => p,
         Err(e) => {

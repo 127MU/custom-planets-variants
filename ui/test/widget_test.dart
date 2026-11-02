@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:cpv/main.dart';
 import 'package:cpv/core.dart';
 import 'package:flutter/material.dart';
@@ -63,6 +64,15 @@ class FakeCore implements CpvApi {
 
   @override
   Future<void> close() async {}
+}
+
+class DelayedCertificateCore extends FakeCore {
+  final certificate = Completer<dynamic>();
+  @override
+  Future<dynamic> call(String method, [Json args = const {}]) =>
+      method == 'install_certificate'
+      ? certificate.future
+      : super.call(method, args);
 }
 
 void main() {
@@ -221,6 +231,34 @@ void main() {
     expect(find.textContaining('昼夜、傍晚'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
+  testWidgets(
+    'certificate authorization progress remains until the request finishes',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final core = DelayedCertificateCore();
+      core.state['certificateExists'] = true;
+      await tester.pumpWidget(
+        CpvApp(core: core, initial: core.initial, nativeWindow: false),
+      );
+      await tester.tap(find.byIcon(Icons.cable_rounded));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('安装信任'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确认'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 220));
+      expect(find.text('安装本机证书'), findsOneWidget);
+      expect(find.byType(CircularProgressIndicator), findsWidgets);
+      core.certificate.completeError(Exception('已取消 Windows 授权'));
+      await tester.pumpAndSettle();
+      expect(find.text('安装本机证书'), findsNothing);
+      expect(find.textContaining('已取消 Windows 授权'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
   testWidgets('responsive pages and Morrow appearance previews', (
     tester,
   ) async {

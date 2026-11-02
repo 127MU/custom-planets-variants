@@ -77,7 +77,9 @@ class CpvCore implements CpvApi {
       _process.stdin.writeln(
         jsonEncode({'id': id, 'method': method, 'args': args}),
       );
-      final result = await c.future.timeout(const Duration(seconds: 60));
+      final result = await c.future.timeout(
+        Duration(seconds: method == 'install_certificate' ? 600 : 60),
+      );
       if (!['state', 'catalog'].contains(method)) {
         Diagnostics.record('rpc', {
           'method': method,

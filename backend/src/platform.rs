@@ -1,4 +1,4 @@
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use base64::Engine;
 use sha1::{Digest, Sha1};
 use std::{
@@ -111,11 +111,10 @@ impl CertificateStore {
                 std::ptr::null_mut(),
             )
         };
-        ensure!(
-            result != 0,
-            "Windows 未能信任证书 / Windows could not trust the certificate: {}",
-            std::io::Error::last_os_error()
-        );
+        if result == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("Windows 未能信任证书 / Windows could not trust the certificate");
+        }
         Ok(())
     }
     fn remove(&self, thumb: &str) -> Result<()> {
@@ -179,7 +178,10 @@ pub fn trusted(_: &Path) -> bool {
 }
 #[cfg(windows)]
 pub fn install_certificate(cert: &Path) -> Result<()> {
-    let der = certificate_der(&std::fs::read(cert)?)?;
+    install_certificate_der(certificate_der(&std::fs::read(cert)?)?)
+}
+#[cfg(windows)]
+fn install_certificate_der(der: Vec<u8>) -> Result<()> {
     certificate_operation(move || {
         let thumb = format!("{:x}", Sha1::digest(&der));
         let store = CertificateStore::current_user(false)?;
@@ -205,6 +207,217 @@ pub fn install_certificate(_: &Path) -> Result<()> {
 }
 #[cfg(not(windows))]
 pub fn remove_certificate(_: &str) -> Result<()> {
+    anyhow::bail!("Windows only")
+}
+
+#[cfg(windows)]
+fn process_identity() -> Result<(String, bool)> {
+    use windows_sys::Win32::{Foundation::*, Security::*, System::Threading::*};
+    let mut token = std::ptr::null_mut();
+    ensure!(
+        unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } != 0,
+        "Cannot read process identity: {}",
+        std::io::Error::last_os_error()
+    );
+    struct Handle(HANDLE);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+    let _guard = Handle(token);
+    let mut length = 0;
+    unsafe {
+        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut length);
+    }
+    ensure!(
+        length > 0 && length < 65536,
+        "Invalid token information length"
+    );
+    let mut buffer = vec![0usize; (length as usize).div_ceil(std::mem::size_of::<usize>())];
+    ensure!(
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                length,
+                &mut length,
+            )
+        } != 0,
+        "Cannot read token user: {}",
+        std::io::Error::last_os_error()
+    );
+    let user = unsafe { &*(buffer.as_ptr() as *const TOKEN_USER) };
+    ensure!(
+        unsafe { IsValidSid(user.User.Sid) } != 0,
+        "Invalid user SID"
+    );
+    let size = unsafe { GetLengthSid(user.User.Sid) } as usize;
+    ensure!(size > 0 && size <= 68, "Invalid SID length");
+    let sid = unsafe { std::slice::from_raw_parts(user.User.Sid as *const u8, size) }
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut returned = 0;
+    ensure!(
+        unsafe {
+            GetTokenInformation(
+                token,
+                TokenElevation,
+                (&mut elevation as *mut TOKEN_ELEVATION).cast(),
+                std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+                &mut returned,
+            )
+        } != 0,
+        "Cannot read elevation state: {}",
+        std::io::Error::last_os_error()
+    );
+    Ok((sid, elevation.TokenIsElevated != 0))
+}
+#[cfg(windows)]
+pub fn elevated_certificate_helper(cert: &Path, digest: &str, expected_user: &str) -> u32 {
+    let result = (|| -> Result<()> {
+        let (sid, elevated) = process_identity()?;
+        ensure!(elevated, "CPV_HELPER_NOT_ELEVATED");
+        ensure!(sid == expected_user, "CPV_HELPER_DIFFERENT_USER");
+        ensure!(
+            digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()),
+            "CPV_HELPER_INVALID_DIGEST"
+        );
+        use sha2::Sha256;
+        let bytes = certificate_der(&std::fs::read(cert)?)?;
+        ensure!(
+            format!("{:x}", Sha256::digest(&bytes)) == digest,
+            "CPV_HELPER_CERT_CHANGED"
+        );
+        install_certificate_der(bytes)
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            let message = error.to_string();
+            if message.contains("DIFFERENT_USER") {
+                10002
+            } else if message.contains("NOT_ELEVATED") {
+                10003
+            } else if message.contains("CERT_CHANGED") || message.contains("INVALID_DIGEST") {
+                10004
+            } else {
+                error
+                    .chain()
+                    .find_map(|cause| {
+                        cause
+                            .downcast_ref::<std::io::Error>()
+                            .and_then(|e| e.raw_os_error())
+                    })
+                    .filter(|code| *code > 0)
+                    .map(|code| code as u32)
+                    .unwrap_or(10005)
+            }
+        }
+    }
+}
+#[cfg(windows)]
+pub fn install_certificate_elevated(cert: &Path) -> Result<()> {
+    use sha2::Sha256;
+    use windows_sys::Win32::{
+        Foundation::*,
+        System::{Com::*, Threading::*},
+        UI::Shell::*,
+    };
+    let cert = cert.canonicalize()?;
+    let der = certificate_der(&std::fs::read(&cert)?)?;
+    let digest = format!("{:x}", Sha256::digest(der));
+    let (identity, _) = process_identity()?;
+    let exe = std::env::current_exe()?;
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(Some(0)).collect()
+    }
+    let path = wide(&exe.to_string_lossy());
+    let verb = wide("runas");
+    let parameters = wide(&format!(
+        "--install-certificate \"{}\" {} {}",
+        cert.display(),
+        digest,
+        identity
+    ));
+    let initialized = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+    ensure!(
+        initialized >= 0,
+        "Cannot initialize Windows authorization dialog (HRESULT {initialized:#x})"
+    );
+    struct Com;
+    impl Drop for Com {
+        fn drop(&mut self) {
+            unsafe {
+                CoUninitialize();
+            }
+        }
+    }
+    let _com = Com;
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = path.as_ptr();
+    info.lpParameters = parameters.as_ptr();
+    info.nShow = 0;
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(1223) {
+            anyhow::bail!(
+                "已取消 Windows 授权，未安装证书 / Windows authorization cancelled; certificate not installed"
+            );
+        }
+        anyhow::bail!("无法请求 Windows 授权 / Cannot request Windows authorization: {error}");
+    }
+    ensure!(
+        !info.hProcess.is_null(),
+        "Windows did not return an installer process"
+    );
+    struct Handle(HANDLE);
+    impl Drop for Handle {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+    let _process = Handle(info.hProcess);
+    ensure!(
+        unsafe { WaitForSingleObject(info.hProcess, 120_000) } == WAIT_OBJECT_0,
+        "证书安装尚未返回，请检查 Windows 授权窗口 / Certificate installation has not returned; check the Windows authorization window"
+    );
+    let mut code = 0;
+    ensure!(
+        unsafe { GetExitCodeProcess(info.hProcess, &mut code) } != 0,
+        "Cannot read installer result"
+    );
+    match code {
+        0 => {}
+        10002 => anyhow::bail!(
+            "授权账户与当前用户不同，已停止，避免将证书安装到其他账户 / Authorization used a different account; installation stopped"
+        ),
+        10003 => anyhow::bail!("安装进程未获得 Windows 授权 / Installer was not elevated"),
+        10004 => anyhow::bail!(
+            "证书文件发生变化，已停止安装 / Certificate file changed; installation stopped"
+        ),
+        _ => anyhow::bail!(
+            "提权安装未完成（代码 {code}），请导出诊断日志 / Elevated installation failed (code {code}); export diagnostic logs"
+        ),
+    }
+    ensure!(
+        trusted(&cert),
+        "Windows 授权结束但未能验证当前用户信任 / Windows authorization finished but current-user trust could not be verified"
+    );
+    Ok(())
+}
+#[cfg(not(windows))]
+pub fn install_certificate_elevated(_: &Path) -> Result<()> {
     anyhow::bail!("Windows only")
 }
 
@@ -431,6 +644,16 @@ mod certificate_tests {
         let error =
             certificate_operation(|| -> Result<()> { anyhow::bail!("test failure") }).unwrap_err();
         assert!(error.to_string().contains("test failure"));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn elevated_helper_rejects_wrong_user_before_touching_certificate() {
+        let code = elevated_certificate_helper(
+            Path::new("missing-certificate.cer"),
+            &"0".repeat(64),
+            "not-the-current-user",
+        );
+        assert!(code == 10002 || code == 10003);
     }
     #[cfg(windows)]
     #[test]

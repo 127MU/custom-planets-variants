@@ -21,7 +21,7 @@
 
 1. 单文件版直接运行 **自定义星球和变种.exe**。首次启动会校验并释放运行时，无需自行安装 Qt、Flutter 或 Python。便携 ZIP 版需完整解压后运行同名 EXE。
 2. 在「星球方案」添加星球，选择效果、作战与分区参数并保存。
-3. 在「连接」生成本机证书。确认用途后点击「安装信任」，仅写入**当前用户**证书库。
+3. 在「连接」生成本机证书。确认用途后点击「安装信任」，在 Windows UAC 中授权后自动安装，仅写入**当前用户**证书库；不会让整个应用长期以管理员身份运行。
 4. 复制界面提供的 Steam 启动选项，粘贴到游戏属性 → 通用 → 启动选项。
 5. 完全退出游戏，开启代理，然后从 Steam 启动游戏。
 
@@ -64,7 +64,7 @@ cd ..
 
 ```powershell
 python tools/package-rust.py --output dist/release --proxy-runtime C:/path/to/mitmproxy-runtime
-.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.0-preview.3_Windows.zip
+.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.0-preview.4_Windows.zip
 ```
 
 启动器输出为 `backend/target/release/cpv-launcher.exe`，可复制并命名为 `自定义星球和变种.exe`。源码不提交 Python 运行时或生成的二进制文件。打包会校验运行时哈希和关键图标字形；出现图标缺失提示时，请先 `flutter clean` 后重新构建。

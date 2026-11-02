@@ -21,7 +21,7 @@ Windows 10 / 11, 64-bit, is required.
 
 1. Run the single-file **自定义星球和变种.exe**. It verifies and extracts its runtime on first launch; Qt, Flutter and Python do not need to be installed separately. For the portable ZIP, extract the entire archive first.
 2. Add a planet, choose effects and operation / region settings, then save the plan.
-3. Generate a local certificate on the Connection page. After reviewing its purpose, select Trust certificate. Only the **current-user** trust store is used.
+3. Generate a local certificate on the Connection page. After reviewing its purpose, select Trust certificate. Authorize the Windows UAC prompt to install automatically. Only the **current-user** trust store is used; the main application does not remain elevated.
 4. Copy the generated Steam launch options into the game's Properties → General → Launch Options.
 5. Fully exit the game, enable the proxy, and launch the game from Steam.
 
@@ -64,7 +64,7 @@ Prepare an official-mitmproxy-based Windows Python runtime containing `python.ex
 
 ```powershell
 python tools/package-rust.py --output dist/release --proxy-runtime C:/path/to/mitmproxy-runtime
-.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.0-preview.3_Windows.zip
+.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.0-preview.4_Windows.zip
 ```
 
 The launcher is written to `backend/target/release/cpv-launcher.exe`; copy and rename it to `自定义星球和变种.exe`. Python runtimes and generated binaries are not committed. Packaging verifies runtime hashes and required icon glyphs. If it detects missing glyphs, run `flutter clean` and rebuild.

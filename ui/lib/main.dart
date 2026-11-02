@@ -600,7 +600,7 @@ class _CpvAppState extends State<CpvApp>
 
             const SizedBox(height: 6),
             const Text(
-              '2.0.0-preview.3',
+              '2.0.0-preview.4',
               style: TextStyle(fontSize: 10, letterSpacing: 1.8),
             ),
           ],
@@ -1041,6 +1041,45 @@ class _CpvAppState extends State<CpvApp>
       [],
     ),
   );
+  Future<void> installCertificateWithAuthorization() async {
+    final progress = showDialog<void>(
+      context: navigator.currentState!.overlay!.context,
+      barrierDismissible: false,
+      builder: (context) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: Text(t('安装本机证书', 'Install local certificate')),
+          content: Row(
+            children: [
+              const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              ),
+              const SizedBox(width: 18),
+              Expanded(
+                child: Text(
+                  t(
+                    '请在 Windows UAC 窗口中授权。授权后自动安装并检查当前用户的信任状态。',
+                    'Authorize the Windows UAC dialog. Installation and current-user trust verification then run automatically.',
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    try {
+      await action('install_certificate');
+    } finally {
+      if (mounted) {
+        navigator.currentState!.pop();
+        await progress;
+      }
+    }
+  }
+
   Future<bool> confirm(String title, String message) async =>
       await showDialog<bool>(
         context: navigator.currentState!.overlay!.context,
@@ -1176,11 +1215,11 @@ class _CpvAppState extends State<CpvApp>
                           if (await confirm(
                             t('信任本机证书？', 'Trust the local certificate?'),
                             t(
-                              '将此代理的 CA 加入当前用户信任库，用于必要游戏 API 的 HTTPS 解密。',
-                              'Adds this proxy CA to the current user trust store for the required game API.',
+                              '同意后将请求 Windows UAC 授权，仅将此代理的 CA 加入当前用户信任库，用于必要游戏 API 的 HTTPS 解密。',
+                              'After confirmation, Windows UAC authorization is requested to add this proxy CA to the current-user trust store for the required game API.',
                             ),
                           )) {
-                            await action('install_certificate');
+                            await installCertificateWithAuthorization();
                           }
                         },
                   style: FilledButton.styleFrom(
@@ -1594,7 +1633,7 @@ class _CpvAppState extends State<CpvApp>
             ),
             const SizedBox(height: 12),
             Text(
-              '$title · 2.0.0-preview.3\nRust + Flutter · Morrow glass components\nAGPL-3.0-only',
+              '$title · 2.0.0-preview.4\nRust + Flutter · Morrow glass components\nAGPL-3.0-only',
             ),
           ],
         ),
