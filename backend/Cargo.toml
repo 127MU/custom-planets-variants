@@ -1,0 +1,43 @@
+[package]
+name = "cpv-core"
+version = "2.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+sha1 = "0.10"
+base64 = "0.22"
+zip = { version = "2.4", default-features = false, features = ["deflate"], optional = true }
+sha2 = "0.10"
+
+[build-dependencies]
+sha2 = "0.10"
+
+[features]
+bundle = ["dep:zip"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security_Cryptography", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Environment", "Win32_System_Diagnostics_ToolHelp", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_UI_Controls"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[[bin]]
+name = "cpv-core"
+path = "src/main.rs"
+
+[[bin]]
+name = "cpv-steam-bridge"
+path = "src/bridge.rs"
+
+[[bin]]
+name = "cpv-launcher"
+path = "src/launcher.rs"
+required-features = ["bundle"]
