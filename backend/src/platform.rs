@@ -142,10 +142,35 @@ impl Drop for CertificateStore {
         }
     }
 }
+/// Certificate operations run on a dedicated thread under this process's own
+/// user identity. No other user's token, privilege elevation or machine store.
+#[cfg(windows)]
+fn certificate_operation<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    struct Identity;
+    impl Drop for Identity {
+        fn drop(&mut self) {
+            if unsafe { windows_sys::Win32::Security::RevertToSelf() } == 0 {
+                // Never continue after a failed security-context restoration.
+                eprintln!("Fatal: unable to restore certificate thread identity");
+                std::process::abort();
+            }
+        }
+    }
+    std::thread::Builder::new().name("cpv-certificate".into()).spawn(move||{
+        let ok=unsafe{windows_sys::Win32::Security::ImpersonateSelf(windows_sys::Win32::Security::SecurityImpersonation)};
+        ensure!(ok!=0,"无法初始化当前用户证书操作上下文 / Cannot initialize the current-user certificate context: {}",std::io::Error::last_os_error());
+        let _identity=Identity;
+        operation()
+    })?.join().map_err(|_|anyhow::anyhow!("证书操作线程异常 / Certificate worker failed"))?
+}
 #[cfg(windows)]
 pub fn trusted(cert: &Path) -> bool {
-    thumbprint(cert)
-        .and_then(|thumb| CertificateStore::current_user(true)?.contains(&thumb))
+    let Ok(thumb) = thumbprint(cert) else {
+        return false;
+    };
+    certificate_operation(move || CertificateStore::current_user(true)?.contains(&thumb))
         .unwrap_or(false)
 }
 #[cfg(not(windows))]
@@ -155,21 +180,24 @@ pub fn trusted(_: &Path) -> bool {
 #[cfg(windows)]
 pub fn install_certificate(cert: &Path) -> Result<()> {
     let der = certificate_der(&std::fs::read(cert)?)?;
-    let thumb = format!("{:x}", Sha1::digest(&der));
-    let store = CertificateStore::current_user(false)?;
-    if !store.contains(&thumb)? {
-        store.add(&der)?;
-    }
-    drop(store);
-    ensure!(
-        CertificateStore::current_user(true)?.contains(&thumb)?,
-        "证书写入后未能验证；可能受到 Windows 策略限制 / Certificate verification failed after installation; check Windows policy"
-    );
-    Ok(())
+    certificate_operation(move || {
+        let thumb = format!("{:x}", Sha1::digest(&der));
+        let store = CertificateStore::current_user(false)?;
+        if !store.contains(&thumb)? {
+            store.add(&der)?;
+        }
+        drop(store);
+        ensure!(
+            CertificateStore::current_user(true)?.contains(&thumb)?,
+            "证书写入后未能验证；可能受到 Windows 策略限制 / Certificate verification failed after installation; check Windows policy"
+        );
+        Ok(())
+    })
 }
 #[cfg(windows)]
 pub fn remove_certificate(thumb: &str) -> Result<()> {
-    CertificateStore::current_user(false)?.remove(thumb)
+    let thumb = thumb.to_string();
+    certificate_operation(move || CertificateStore::current_user(false)?.remove(&thumb))
 }
 #[cfg(not(windows))]
 pub fn install_certificate(_: &Path) -> Result<()> {
@@ -368,6 +396,41 @@ mod certificate_tests {
         let der = certificate_der(pem).unwrap();
         assert_eq!(der, certificate_der(&der).unwrap());
         assert!(certificate_der(b"invalid certificate").is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn certificate_worker_uses_own_impersonation_context_and_restores() {
+        certificate_operation(|| {
+            use windows_sys::Win32::{Foundation::*, Security::*, System::Threading::*};
+            let mut token = std::ptr::null_mut();
+            assert_ne!(
+                unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) },
+                0
+            );
+            let mut level: i32 = -1;
+            let mut length = 0;
+            let ok = unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenImpersonationLevel,
+                    (&mut level as *mut i32).cast(),
+                    4,
+                    &mut length,
+                )
+            };
+            unsafe {
+                CloseHandle(token);
+            }
+            assert_ne!(ok, 0);
+            assert_eq!(level, SecurityImpersonation);
+            let store = CertificateStore::current_user(true)?;
+            drop(store);
+            Ok(())
+        })
+        .unwrap();
+        let error =
+            certificate_operation(|| -> Result<()> { anyhow::bail!("test failure") }).unwrap_err();
+        assert!(error.to_string().contains("test failure"));
     }
     #[cfg(windows)]
     #[test]

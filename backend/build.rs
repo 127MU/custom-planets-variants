@@ -30,7 +30,7 @@ fn main() {
     let rc = out.join("launcher.rc");
     let res = out.join("launcher.res");
     let escaped = |p: PathBuf| p.to_string_lossy().replace('\\', "\\\\");
-    fs::write(&rc,format!("#pragma code_page(65001)\n1 ICON \"{}\"\n1 24 \"{}\"\n1 VERSIONINFO FILEVERSION 2,0,0,2 PRODUCTVERSION 2,0,0,2 FILEOS 0x40004 FILETYPE 1 BEGIN BLOCK \"StringFileInfo\" BEGIN BLOCK \"040904b0\" BEGIN VALUE \"FileDescription\", \"自定义星球和变种\\0\" VALUE \"ProductName\", \"自定义星球和变种\\0\" VALUE \"ProductVersion\", \"2.0.0-preview.2\\0\" VALUE \"LegalCopyright\", \"CPV contributors; AGPL-3.0-only\\0\" END END BLOCK \"VarFileInfo\" BEGIN VALUE \"Translation\", 0x409, 1200 END END\n",escaped(icon),escaped(manifest))).unwrap();
+    fs::write(&rc,format!("#pragma code_page(65001)\n1 ICON \"{}\"\n1 24 \"{}\"\n1 VERSIONINFO FILEVERSION 2,0,0,3 PRODUCTVERSION 2,0,0,3 FILEOS 0x40004 FILETYPE 1 BEGIN BLOCK \"StringFileInfo\" BEGIN BLOCK \"040904b0\" BEGIN VALUE \"FileDescription\", \"自定义星球和变种\\0\" VALUE \"ProductName\", \"自定义星球和变种\\0\" VALUE \"ProductVersion\", \"2.0.0-preview.3\\0\" VALUE \"LegalCopyright\", \"CPV contributors; AGPL-3.0-only\\0\" END END BLOCK \"VarFileInfo\" BEGIN VALUE \"Translation\", 0x409, 1200 END END\n",escaped(icon),escaped(manifest))).unwrap();
     let status = Command::new(env::var_os("RC").unwrap_or_else(|| "rc.exe".into()))
         .arg("/nologo")
         .arg(format!("/fo{}", res.display()))

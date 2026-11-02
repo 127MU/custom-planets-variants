@@ -12,7 +12,7 @@ p.add_argument('--flutter-build',type=Path,default=ROOT/'ui/build/windows/x64/ru
 p.add_argument('--rust-build',type=Path,default=ROOT/'backend/target/release')
 a=p.parse_args()
 verify_icons(a.flutter_build)
-out=a.output.resolve();release=out/'CPV_2.0.0-preview.2'
+out=a.output.resolve();release=out/'CPV_2.0.0-preview.3'
 if release.exists():p.error('Use a fresh package output directory')
 release.mkdir(parents=True)
 for file in a.flutter_build.rglob('*'):
@@ -47,7 +47,7 @@ shutil.copy2(ROOT/'licenses/Morrow-LICENSE',release/'LICENSE')
 shutil.copy2(ROOT/'README.md',release/'README.md')
 shutil.copy2(ROOT/'README.en.md',release/'README.en.md')
 files={f.relative_to(release).as_posix():hashlib.sha256(f.read_bytes()).hexdigest() for f in release.rglob('*') if f.is_file()}
-(release/'manifest.json').write_text(json.dumps({'product':'CPV','version':'2.0.0-preview.2','files':files},ensure_ascii=False,indent=2),'utf8')
+(release/'manifest.json').write_text(json.dumps({'product':'CPV','version':'2.0.0-preview.3','files':files},ensure_ascii=False,indent=2),'utf8')
 archive=out/(release.name+'_Windows.zip')
 with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
     for f in release.rglob('*'):

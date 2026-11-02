@@ -64,7 +64,7 @@ cd ..
 
 ```powershell
 python tools/package-rust.py --output dist/release --proxy-runtime C:/path/to/mitmproxy-runtime
-.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.0-preview.2_Windows.zip
+.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.0-preview.3_Windows.zip
 ```
 
 启动器输出为 `backend/target/release/cpv-launcher.exe`，可复制并命名为 `自定义星球和变种.exe`。源码不提交 Python 运行时或生成的二进制文件。打包会校验运行时哈希和关键图标字形；出现图标缺失提示时，请先 `flutter clean` 后重新构建。

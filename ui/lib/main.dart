@@ -600,7 +600,7 @@ class _CpvAppState extends State<CpvApp>
 
             const SizedBox(height: 6),
             const Text(
-              '2.0.0-preview.2',
+              '2.0.0-preview.3',
               style: TextStyle(fontSize: 10, letterSpacing: 1.8),
             ),
           ],
@@ -1594,7 +1594,7 @@ class _CpvAppState extends State<CpvApp>
             ),
             const SizedBox(height: 12),
             Text(
-              '$title · 2.0.0-preview.2\nRust + Flutter · Morrow glass components\nAGPL-3.0-only',
+              '$title · 2.0.0-preview.3\nRust + Flutter · Morrow glass components\nAGPL-3.0-only',
             ),
           ],
         ),
