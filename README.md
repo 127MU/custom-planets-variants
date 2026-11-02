@@ -45,6 +45,13 @@
 
 证书安装如被 Windows 策略拒绝，界面会显示系统错误；不要通过全局更改系统信任策略解决。移除信任仅针对本程序记录的证书。
 
+
+### 自动更新
+
+每次启动都会在后台检查一次正式发行版，有新版时弹窗展示更新日志。GitHub 不可访问时会依次尝试 GH-Proxy 和 GHFast 镜像；弹窗提供原站与两条镜像下载按钮，点击后在默认浏览器下载。设置的“关于”中也可手动检查更新，并查看作者 127MU 与项目地址。软件不会自动运行下载的安装包。
+
+发布新版本时，使用 `tools/release-manifest.py` 生成 `latest.json`，与 EXE 一起上传到同一个正式发行版，镜像更新检测依赖此文件。
+
 ## 从源码构建
 
 需要 Rust stable（支持 edition 2024）、Flutter stable、Python 3，以及 Visual Studio 2022 的 C++ 桌面开发组件和 Windows SDK。开发验证使用 Flutter 3.47.9 / Dart 3.13.7。
@@ -64,7 +71,7 @@ cd ..
 
 ```powershell
 python tools/package-rust.py --output dist/release --proxy-runtime C:/path/to/mitmproxy-runtime
-.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.0-preview.4_Windows.zip
+.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.0_Windows.zip
 ```
 
 启动器输出为 `backend/target/release/cpv-launcher.exe`，可复制并命名为 `自定义星球和变种.exe`。源码不提交 Python 运行时或生成的二进制文件。打包会校验运行时哈希和关键图标字形；出现图标缺失提示时，请先 `flutter clean` 后重新构建。

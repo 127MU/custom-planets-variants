@@ -12,7 +12,7 @@ use std::{
 };
 
 const PAYLOAD: &[u8] = include_bytes!(env!("CPV_PAYLOAD"));
-const PREFIX: &str = "CPV_2.0.0-preview.4";
+const PREFIX: &str = "CPV_2.0.0";
 fn hash(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }

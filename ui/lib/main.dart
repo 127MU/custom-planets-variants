@@ -11,6 +11,8 @@ import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:window_manager/window_manager.dart';
 
+import 'package:url_launcher/url_launcher.dart';
+import 'updates.dart';
 import 'core.dart';
 import 'diagnostics.dart';
 import 'morrow/liquid_glass.dart';
@@ -123,10 +125,12 @@ class CpvApp extends StatefulWidget {
     required this.core,
     required this.initial,
     this.nativeWindow = true,
+    this.updates,
   });
   final CpvApi core;
   final Json initial;
   final bool nativeWindow;
+  final UpdateClient? updates;
   @override
   State<CpvApp> createState() => _CpvAppState();
 }
@@ -138,6 +142,9 @@ class _CpvAppState extends State<CpvApp>
   int page = 0;
   int settingsRevision = 0;
   bool working = false, polling = false;
+  bool checkingUpdates = false;
+  UpdateInfo? latestUpdate;
+  bool updateFailed = false;
   String query = '';
   Timer? timer, saveTimer;
   Future<void>? closing;
@@ -173,6 +180,11 @@ class _CpvAppState extends State<CpvApp>
     effects = rows(widget.initial['catalog']['effects']);
     planets = rows(widget.initial['catalog']['planets']);
     timer = Timer.periodic(const Duration(seconds: 1), (_) => poll());
+    if (widget.nativeWindow) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        checkForUpdates(automatic: true);
+      });
+    }
   }
 
   static List<Json> rows(dynamic v) =>
@@ -600,7 +612,7 @@ class _CpvAppState extends State<CpvApp>
 
             const SizedBox(height: 6),
             const Text(
-              '2.0.0-preview.4',
+              '2.0.0',
               style: TextStyle(fontSize: 10, letterSpacing: 1.8),
             ),
           ],
@@ -1345,6 +1357,129 @@ class _CpvAppState extends State<CpvApp>
     ),
     child: Text('$label  $n'),
   );
+  Future<void> openBrowser(Uri uri) async {
+    if (uri.scheme != 'https' ||
+        !['github.com', 'gh-proxy.com', 'ghfast.top'].contains(uri.host)) {
+      return;
+    }
+    try {
+      if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+        note(
+          t(
+            '无法打开浏览器，可复制仓库地址手动访问',
+            'Could not open the browser; copy the repository address to open it manually',
+          ),
+        );
+      }
+    } catch (e) {
+      note(t('打开浏览器失败', 'Could not open the browser'));
+    }
+  }
+
+  Future<void> checkForUpdates({bool automatic = false}) async {
+    if (checkingUpdates || !mounted) return;
+    setState(() {
+      checkingUpdates = true;
+      updateFailed = false;
+    });
+    try {
+      final result = await (widget.updates ?? UpdateClient()).check();
+      if (!mounted) return;
+      setState(() => latestUpdate = result);
+      if (result.newerThan(productVersion)) {
+        while (mounted &&
+            closing == null &&
+            (working || navigator.currentState?.canPop() == true)) {
+          await Future<void>.delayed(const Duration(milliseconds: 300));
+        }
+        if (!mounted || closing != null) return;
+        await showDialog<void>(
+          context: navigator.currentState!.overlay!.context,
+          builder: (context) => AlertDialog(
+            title: Text('${t('发现新版本', 'New version')} ${result.version}'),
+            content: SizedBox(
+              width: 650,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('${t('当前版本', 'Current version')}: $productVersion'),
+                    const SizedBox(height: 16),
+                    SelectableText(
+                      result.notes.isEmpty
+                          ? t('此发行版未提供更新日志', 'No release notes were supplied')
+                          : result.notes,
+                    ),
+                    if (result.sha256.isNotEmpty) ...[
+                      const SizedBox(height: 16),
+                      SelectableText(
+                        'SHA-256: ${result.sha256}',
+                        style: const TextStyle(fontSize: 11),
+                      ),
+                    ],
+                    const SizedBox(height: 16),
+                    Text(
+                      t(
+                        '下载会在默认浏览器打开；镜像为第三方下载线路。',
+                        'Downloads open in your default browser. Mirrors are third-party download routes.',
+                      ),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  TextButton(
+                    onPressed: () => openBrowser(result.releaseUri),
+                    child: Text(t('查看发行版', 'Release page')),
+                  ),
+                  OutlinedButton(
+                    onPressed: () => openBrowser(result.downloadUri(0)),
+                    child: Text(t('GitHub 下载', 'GitHub download')),
+                  ),
+                  FilledButton(
+                    onPressed: () => openBrowser(result.downloadUri(1)),
+                    child: Text(t('镜像 1 下载', 'Mirror 1 download')),
+                  ),
+                  OutlinedButton(
+                    onPressed: () => openBrowser(result.downloadUri(2)),
+                    child: Text(t('镜像 2 下载', 'Mirror 2 download')),
+                  ),
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: Text(t('稍后再说', 'Later')),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      } else if (!automatic) {
+        note(t('当前已是最新正式版', 'You are running the latest stable release'));
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => updateFailed = true);
+        if (!automatic) {
+          note(
+            t(
+              '更新检查失败，已尝试 GitHub 和两条镜像线路，请稍后重试',
+              'GitHub and both mirror update sources failed; please try again later',
+            ),
+          );
+        }
+      }
+    } finally {
+      if (mounted) setState(() => checkingUpdates = false);
+    }
+  }
+
   Future<void> runDiagnostics() async {
     final report = await action('diagnose');
     if (report is! Map || !mounted) return;
@@ -1633,8 +1768,48 @@ class _CpvAppState extends State<CpvApp>
             ),
             const SizedBox(height: 12),
             Text(
-              '$title · 2.0.0-preview.4\nRust + Flutter · Morrow glass components\nAGPL-3.0-only',
+              '$title · 2.0.0\nRust + Flutter · Morrow glass components\nAGPL-3.0-only',
             ),
+            const SizedBox(height: 14),
+            Text('${t('作者', 'Author')}: 127MU'),
+            const SizedBox(height: 8),
+            SelectableText(projectUri.toString()),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 12,
+              runSpacing: 10,
+              children: [
+                OutlinedButton(
+                  onPressed: () => openBrowser(projectUri),
+                  child: Text(t('打开项目仓库', 'Open repository')),
+                ),
+                FilledButton.icon(
+                  onPressed: checkingUpdates ? null : () => checkForUpdates(),
+                  icon: const Icon(Icons.download),
+                  label: Text(
+                    checkingUpdates
+                        ? t('正在检查更新…', 'Checking…')
+                        : t('检查更新', 'Check for updates'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Text(
+              t(
+                '每次启动自动检查；GitHub 无法访问时自动尝试两条镜像线路。',
+                'Checks at every launch and tries two mirror routes when GitHub cannot be reached.',
+              ),
+              style: const TextStyle(fontSize: 12),
+            ),
+            if (updateFailed)
+              Text(
+                t(
+                  '本次更新检查未成功，可点击重试。',
+                  'The last update check failed; you can retry.',
+                ),
+                style: const TextStyle(fontSize: 12),
+              ),
           ],
         ),
       ),

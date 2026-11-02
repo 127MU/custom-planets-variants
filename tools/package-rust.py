@@ -12,7 +12,7 @@ p.add_argument('--flutter-build',type=Path,default=ROOT/'ui/build/windows/x64/ru
 p.add_argument('--rust-build',type=Path,default=ROOT/'backend/target/release')
 a=p.parse_args()
 verify_icons(a.flutter_build)
-out=a.output.resolve();release=out/'CPV_2.0.0-preview.4'
+out=a.output.resolve();release=out/'CPV_2.0.0'
 if release.exists():p.error('Use a fresh package output directory')
 release.mkdir(parents=True)
 for file in a.flutter_build.rglob('*'):
@@ -47,7 +47,7 @@ shutil.copy2(ROOT/'licenses/Morrow-LICENSE',release/'LICENSE')
 shutil.copy2(ROOT/'README.md',release/'README.md')
 shutil.copy2(ROOT/'README.en.md',release/'README.en.md')
 files={f.relative_to(release).as_posix():hashlib.sha256(f.read_bytes()).hexdigest() for f in release.rglob('*') if f.is_file()}
-(release/'manifest.json').write_text(json.dumps({'product':'CPV','version':'2.0.0-preview.4','files':files},ensure_ascii=False,indent=2),'utf8')
+(release/'manifest.json').write_text(json.dumps({'product':'CPV','version':'2.0.0','files':files},ensure_ascii=False,indent=2),'utf8')
 archive=out/(release.name+'_Windows.zip')
 with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
     for f in release.rglob('*'):
@@ -59,7 +59,7 @@ with zipfile.ZipFile(source,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
             if folder=='licenses' and f.name.startswith('Qt-'):continue
             if folder=='assets' and f.name in {'i18n-en.json','app.manifest','icon-prompt.txt'}:continue
             if f.is_file() and not any(part in {'ephemeral','__pycache__'} for part in f.parts):z.write(f,'CPV_Source/'+f.relative_to(ROOT).as_posix())
-    for name in ['.gitignore','LICENSE','README.md','README.en.md','backend/Cargo.toml','backend/Cargo.lock','backend/build.rs','ui/pubspec.yaml','ui/pubspec.lock','ui/analysis_options.yaml','ui/.gitignore','ui/.metadata','ui/README.md','tools/build-rust.ps1','tools/package-rust.py','tools/proxy_runtime_policy.py','tools/font_assets.py','tests/test_catalog.py','tests/test_translations.py','tests/test_war_status_addon.py','tests/test_rust_core.py']:
+    for name in ['.gitignore','LICENSE','README.md','README.en.md','backend/Cargo.toml','backend/Cargo.lock','backend/build.rs','ui/pubspec.yaml','ui/pubspec.lock','ui/analysis_options.yaml','ui/.gitignore','ui/.metadata','ui/README.md','tools/build-rust.ps1','tools/package-rust.py','tools/proxy_runtime_policy.py','tools/font_assets.py','tools/release-manifest.py','tests/test_catalog.py','tests/test_translations.py','tests/test_war_status_addon.py','tests/test_rust_core.py']:
         z.write(ROOT/name,'CPV_Source/'+name)
 hashes={f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in [archive,source]}
 (out/'SHA256SUMS.txt').write_text(''.join(f'{digest}  {name}\n' for name,digest in hashes.items()),'utf8')

@@ -45,6 +45,13 @@ The default profile is `%LOCALAPPDATA%/CPV/RustProfile`; logs are under `diagnos
 
 If Windows policy rejects certificate installation, the application reports the system error. Do not change global trust policy to work around it. Removing trust only targets the certificate recorded by this application.
 
+
+### Updates
+
+Every launch checks stable releases in the background. A newer release opens a dialog with release notes. If GitHub is unreachable, the app tries GH-Proxy and GHFast mirrors. Original and mirror download buttons open the default browser; installers are never executed automatically. Settings → About also offers a manual check and displays author 127MU and the repository address.
+
+When publishing, generate `latest.json` with `tools/release-manifest.py` and upload it alongside the EXE in the same stable release. Mirror-based update detection relies on this file.
+
 ## Build from source
 
 Install Rust stable with edition 2024 support, Flutter stable, Python 3, Visual Studio 2022 Desktop development with C++, and a Windows SDK. Development validation used Flutter 3.47.9 / Dart 3.13.7.
@@ -64,7 +71,7 @@ Prepare an official-mitmproxy-based Windows Python runtime containing `python.ex
 
 ```powershell
 python tools/package-rust.py --output dist/release --proxy-runtime C:/path/to/mitmproxy-runtime
-.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.0-preview.4_Windows.zip
+.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.0_Windows.zip
 ```
 
 The launcher is written to `backend/target/release/cpv-launcher.exe`; copy and rename it to `自定义星球和变种.exe`. Python runtimes and generated binaries are not committed. Packaging verifies runtime hashes and required icon glyphs. If it detects missing glyphs, run `flutter clean` and rebuild.

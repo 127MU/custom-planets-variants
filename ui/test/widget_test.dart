@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:cpv/main.dart';
+import 'package:cpv/updates.dart';
 import 'package:cpv/core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart' hide matches;
@@ -256,6 +257,58 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.text('安装本机证书'), findsNothing);
       expect(find.textContaining('已取消 Windows 授权'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    },
+  );
+  testWidgets(
+    'about shows author and repository and update prompt contains release notes and mirror downloads',
+    (tester) async {
+      tester.view.physicalSize = const Size(1280, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final core = FakeCore();
+      final updates = UpdateClient(
+        fetch: (uri) async {
+          if (uri.host == 'api.github.com') {
+            throw const FormatException('blocked GitHub');
+          }
+          return {
+            'schema': 1,
+            'repository': projectRepository,
+            'version': '2.0.1',
+            'asset': 'CPV_2.0.1.exe',
+            'notes': '修复更新日志',
+            'sha256': '',
+          };
+        },
+      );
+      await tester.pumpWidget(
+        CpvApp(
+          core: core,
+          initial: core.initial,
+          nativeWindow: false,
+          updates: updates,
+        ),
+      );
+      await tester.tap(find.byIcon(Icons.tune_rounded));
+      await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.text('检查更新'),
+        500,
+        scrollable: find.byType(Scrollable).last,
+      );
+      expect(find.text('作者: 127MU'), findsOneWidget);
+      expect(find.text(projectUri.toString()), findsOneWidget);
+      await tester.tap(find.text('检查更新'));
+      await tester.pumpAndSettle();
+      expect(find.text('发现新版本 2.0.1'), findsOneWidget);
+      expect(find.text('修复更新日志'), findsOneWidget);
+      expect(find.text('GitHub 下载'), findsOneWidget);
+      expect(find.text('镜像 1 下载'), findsOneWidget);
+      expect(find.text('镜像 2 下载'), findsOneWidget);
+      await tester.tap(find.text('稍后再说'));
+      await tester.pumpAndSettle();
       await tester.pumpWidget(const SizedBox());
     },
   );
