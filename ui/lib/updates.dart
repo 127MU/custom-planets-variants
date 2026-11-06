@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-const productVersion = '2.0.0';
+const productVersion = '2.0.1';
 const projectRepository = '127MU/custom-planets-variants';
 final projectUri = Uri.https('github.com', '/$projectRepository');
 const updateMirrors = ['https://gh-proxy.com/', 'https://ghfast.top/'];

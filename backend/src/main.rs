@@ -19,6 +19,60 @@ fn now() -> f64 {
         .unwrap_or_default()
         .as_secs_f64()
 }
+
+fn validate_inventory_preview(plan: &Value) -> Result<()> {
+    ensure!(
+        serde_json::to_vec_pretty(plan)?.len() <= 65536,
+        "Inventory plan exceeds 64 KiB"
+    );
+    fn records<'a>(value: &'a Value, name: &str) -> Result<&'a Vec<Value>> {
+        value
+            .as_array()
+            .filter(|rows| rows.len() <= 128)
+            .with_context(|| format!("无效或过多的条目 / Invalid or excessive entries: {name}"))
+    }
+    fn id(value: &Value) -> Result<u32> {
+        value
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .context("Invalid mix ID")
+    }
+    ensure!(plan["enabled"].is_boolean(), "Invalid inventory switch");
+    for row in records(&plan["items"], "items")? {
+        ensure!(id(&row["mixId"])? != 0, "Invalid item mix ID");
+        ensure!(
+            row["amount"] == 1 && row["isDiscovered"].is_boolean(),
+            "Invalid item preview"
+        );
+    }
+    for value in records(&plan["remove"], "remove")? {
+        ensure!(id(value)? != 0, "Invalid removed mix ID");
+    }
+    for row in records(&plan["customization"], "customization")? {
+        ensure!(id(&row["mixId32"])? != 0, "Invalid customization mix ID");
+        id(&row["index"])?;
+        id(&row["activeIndex"])?;
+        for (key, count) in [("slots", 8), ("modes", 4)] {
+            let values = records(&row[key], key)?;
+            ensure!(values.len() == count, "Invalid customization array: {key}");
+            for value in values {
+                id(value)?;
+            }
+        }
+    }
+    if let Some(changes) = plan.get("attachmentChanges") {
+        for row in records(changes, "attachmentChanges")? {
+            ensure!(id(&row["weapon"])? != 0, "Invalid weapon mix ID");
+            let from = id(&row["from"])?;
+            let to = id(&row["to"])?;
+            ensure!(
+                from != 0 && to != 0 && from != to,
+                "Invalid attachment replacement"
+            );
+        }
+    }
+    Ok(())
+}
 struct Host {
     profile: PathBuf,
     _profile_lock: fs::File,
@@ -91,6 +145,9 @@ impl Host {
         }
         if let Some(v) = settings.get("diagnostics") {
             ensure!(v.is_boolean(), "Invalid diagnostics setting");
+        }
+        if let Some(v) = settings.get("backgroundImage") {
+            ensure!(v.is_null() || v.is_string(), "Invalid background image");
         }
         let path = profile.join("war-targets.json");
         let targets = if path.exists() {
@@ -395,6 +452,20 @@ impl Host {
                 let v = read_json(&self.profile.join("war-targets.backup.json"))?;
                 self.persist(import_document(v)?)
             }
+            "inventory_preview" => {
+                let path = self.root().join("inventory-preview.json");
+                if args.get("enabled").is_some() {
+                    validate_inventory_preview(&args)?;
+                    write_json(&path, &args)?;
+                    return Ok(args);
+                }
+                if !path.exists() {
+                    return Ok(json!({"enabled":true,"items":[],"remove":[],"customization":[]}));
+                }
+                let plan = read_json(&path)?;
+                validate_inventory_preview(&plan)?;
+                Ok(plan)
+            }
             "settings" => {
                 ensure!(args.is_object(), "Invalid settings");
                 let mut next = self.settings.clone();
@@ -425,6 +496,11 @@ impl Host {
                         }
                         "runtime" => ensure!(value.is_string(), "Invalid runtime"),
                         "diagnostics" => ensure!(value.is_boolean(), "Invalid diagnostics switch"),
+                        "backgroundImage" => ensure!(
+                            value.is_null()
+                                || value.as_str().is_some_and(|path| path.len() <= 32768),
+                            "Invalid background image"
+                        ),
                         _ => bail!("Unknown setting: {key}"),
                     };
                     next[key] = value.clone();

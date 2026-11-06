@@ -10,6 +10,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", addon.display());
     println!("cargo:rustc-env=CPV_ADDON_SHA256={digest}");
     println!("cargo:rerun-if-env-changed=CPV_PAYLOAD");
+    println!("cargo:rerun-if-env-changed=CPV_PAYLOAD_MANIFEST");
     println!("cargo:rerun-if-changed=../assets/app.ico");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
@@ -20,6 +21,14 @@ fn main() {
             PathBuf::from(payload).display()
         );
     }
+    if let Some(manifest) = env::var_os("CPV_PAYLOAD_MANIFEST") {
+        println!(
+            "cargo:rerun-if-changed={}",
+            PathBuf::from(manifest).display()
+        );
+        println!("cargo:rustc-cfg=cpv_xz_payload");
+    }
+    println!("cargo:rustc-check-cfg=cfg(cpv_xz_payload)");
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let icon = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap())
         .join("../assets/app.ico")
@@ -30,7 +39,7 @@ fn main() {
     let rc = out.join("launcher.rc");
     let res = out.join("launcher.res");
     let escaped = |p: PathBuf| p.to_string_lossy().replace('\\', "\\\\");
-    fs::write(&rc,format!("#pragma code_page(65001)\n1 ICON \"{}\"\n1 24 \"{}\"\n1 VERSIONINFO FILEVERSION 2,0,0,0 PRODUCTVERSION 2,0,0,0 FILEOS 0x40004 FILETYPE 1 BEGIN BLOCK \"StringFileInfo\" BEGIN BLOCK \"040904b0\" BEGIN VALUE \"FileDescription\", \"自定义星球和变种\\0\" VALUE \"ProductName\", \"自定义星球和变种\\0\" VALUE \"ProductVersion\", \"2.0.0\\0\" VALUE \"LegalCopyright\", \"CPV contributors; AGPL-3.0-only\\0\" END END BLOCK \"VarFileInfo\" BEGIN VALUE \"Translation\", 0x409, 1200 END END\n",escaped(icon),escaped(manifest))).unwrap();
+    fs::write(&rc,format!("#pragma code_page(65001)\n1 ICON \"{}\"\n1 24 \"{}\"\n1 VERSIONINFO FILEVERSION 2,0,1,0 PRODUCTVERSION 2,0,1,0 FILEOS 0x40004 FILETYPE 1 BEGIN BLOCK \"StringFileInfo\" BEGIN BLOCK \"040904b0\" BEGIN VALUE \"FileDescription\", \"自定义星球和变种\\0\" VALUE \"ProductName\", \"自定义星球和变种\\0\" VALUE \"ProductVersion\", \"2.0.1\\0\" VALUE \"LegalCopyright\", \"CPV contributors; AGPL-3.0-only\\0\" END END BLOCK \"VarFileInfo\" BEGIN VALUE \"Translation\", 0x409, 1200 END END\n",escaped(icon),escaped(manifest))).unwrap();
     let status = Command::new(env::var_os("RC").unwrap_or_else(|| "rc.exe".into()))
         .arg("/nologo")
         .arg(format!("/fo{}", res.display()))

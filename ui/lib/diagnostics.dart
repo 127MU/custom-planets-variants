@@ -76,7 +76,7 @@ class Diagnostics {
       } catch (_) {}
     }
     record('ui_startup', {
-      'version': '2.0.0',
+      'version': '2.0.1',
       'operating_system': Platform.operatingSystemVersion,
       'architecture': Platform.version.split(' ').last,
     }, force: true);
@@ -142,7 +142,7 @@ class Diagnostics {
       const JsonEncoder.withIndent('  ').convert({
         'schema': 1,
         'product': '自定义星球和变种 / Custom Planets & Variants',
-        'version': '2.0.0',
+        'version': '2.0.1',
         'startup_error': safe(error),
         'operating_system': Platform.operatingSystemVersion,
         'events': events,

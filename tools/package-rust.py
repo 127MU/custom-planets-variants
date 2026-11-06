@@ -1,5 +1,5 @@
 """Package only the Rust/Flutter app and the verified HTTP proxy runtime."""
-import argparse, hashlib, json, shutil, zipfile
+import argparse, hashlib, io, json, lzma, shutil, zipfile
 from pathlib import Path
 from proxy_runtime_policy import include_proxy_file
 from font_assets import verify_icons
@@ -8,11 +8,14 @@ ROOT=Path(__file__).resolve().parents[1]
 p=argparse.ArgumentParser()
 p.add_argument('--output',type=Path,required=True)
 p.add_argument('--proxy-runtime',type=Path,required=True)
+p.add_argument('--solid-payload',type=Path,help='Write an XZ launcher payload containing the complete distribution')
 p.add_argument('--flutter-build',type=Path,default=ROOT/'ui/build/windows/x64/runner/Release')
 p.add_argument('--rust-build',type=Path,default=ROOT/'backend/target/release')
 a=p.parse_args()
 verify_icons(a.flutter_build)
-out=a.output.resolve();release=out/'CPV_2.0.0'
+if not (a.flutter_build/'url_launcher_windows_plugin.dll').is_file():
+    p.error('Windows browser launcher plugin is missing from the Flutter build')
+out=a.output.resolve();release=out/'CPV_2.0.1'
 if release.exists():p.error('Use a fresh package output directory')
 release.mkdir(parents=True)
 for file in a.flutter_build.rglob('*'):
@@ -31,23 +34,37 @@ if redists:
         file=sorted(redists)[-1]/name
         if file.exists():shutil.copy2(file,release/name)
 
-metadata=json.loads((a.proxy_runtime/'runtime.json').read_text('utf8'))
-assert metadata['core']=='mitmproxy' and metadata['version']=='12.3.1'
-kept={name:digest for name,digest in metadata['files'].items() if include_proxy_file(name)}
-for name,digest in kept.items():
-    file=(a.proxy_runtime/name).resolve();assert file.is_relative_to(a.proxy_runtime.resolve())
-    assert hashlib.sha256(file.read_bytes()).hexdigest()==digest,name
-    dst=release/'mitmproxy'/name;dst.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(file,dst)
-metadata['files']=kept;metadata['capture_modes']=['regular','upstream']
-(release/'mitmproxy/runtime.json').write_text(json.dumps(metadata,indent=2),'utf8')
+metadata = json.loads((a.proxy_runtime / 'runtime.json').read_text('utf8'))
+assert metadata['core'] == 'mitmproxy' and metadata['version'] == '12.3.1'
+kept = {name: digest for name, digest in metadata['files'].items() if include_proxy_file(name)}
+for name, digest in kept.items():
+    file = (a.proxy_runtime / name).resolve()
+    assert file.is_relative_to(a.proxy_runtime.resolve())
+    assert hashlib.sha256(file.read_bytes()).hexdigest() == digest, name
+    dst = release / 'mitmproxy' / name
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(file, dst)
+metadata['files'] = kept
+metadata['capture_modes'] = ['regular', 'upstream']
+(release / 'mitmproxy/runtime.json').write_text(json.dumps(metadata, indent=2), 'utf8')
 (release/'licenses').mkdir()
-for name in ['Morrow-LICENSE','Morrow-NOTICE','Morrow-PROVENANCE.md','SHODAN-LICENSE']:
+for name in ['Morrow-LICENSE','Morrow-NOTICE','Morrow-PROVENANCE.md','SHODAN-LICENSE','lzma-rust2-LICENSE','hd2-datamined-LICENSE']:
     shutil.copy2(ROOT/'licenses'/name,release/'licenses'/name)
 shutil.copy2(ROOT/'licenses/Morrow-LICENSE',release/'LICENSE')
 shutil.copy2(ROOT/'README.md',release/'README.md')
 shutil.copy2(ROOT/'README.en.md',release/'README.en.md')
 files={f.relative_to(release).as_posix():hashlib.sha256(f.read_bytes()).hexdigest() for f in release.rglob('*') if f.is_file()}
-(release/'manifest.json').write_text(json.dumps({'product':'CPV','version':'2.0.0','files':files},ensure_ascii=False,indent=2),'utf8')
+(release/'manifest.json').write_text(json.dumps({'product':'CPV','version':'2.0.1','files':files},ensure_ascii=False,indent=2),'utf8')
+if a.solid_payload:
+    stored = io.BytesIO()
+    entries = sorted((f for f in release.rglob('*') if f.is_file()),
+                     key=lambda f: (f.suffix.lower(), f.as_posix()))
+    with zipfile.ZipFile(stored, 'w', zipfile.ZIP_STORED) as z:
+        for f in entries:
+            z.write(f, release.name + '/' + f.relative_to(release).as_posix())
+    a.solid_payload.parent.mkdir(parents=True, exist_ok=True)
+    with lzma.open(a.solid_payload, 'wb', preset=6) as payload:
+        payload.write(stored.getbuffer())
 archive=out/(release.name+'_Windows.zip')
 with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
     for f in release.rglob('*'):

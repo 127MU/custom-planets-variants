@@ -2,7 +2,7 @@ import collections,json,pathlib,unittest
 class Catalog(unittest.TestCase):
  def test_complete_distinct_categorized(self):
   rows=json.loads((pathlib.Path(__file__).parents[1]/'assets/war_catalog.json').read_text('utf8'))['effects']
-  self.assertEqual(len(rows),312);self.assertEqual(len({r['id'] for r in rows}),312)
+  self.assertEqual(len(rows),315);self.assertEqual(len({r['id'] for r in rows}),315)
   self.assertGreaterEqual(len({r['groupKey'] for r in rows}),10)
   self.assertTrue(all(r['name'] and r['groupLabel'] and isinstance(r['experimental'],bool) for r in rows))
   for r in rows:

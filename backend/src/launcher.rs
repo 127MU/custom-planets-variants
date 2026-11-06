@@ -12,7 +12,9 @@ use std::{
 };
 
 const PAYLOAD: &[u8] = include_bytes!(env!("CPV_PAYLOAD"));
-const PREFIX: &str = "CPV_2.0.0";
+#[cfg(cpv_xz_payload)]
+const PAYLOAD_MANIFEST: &[u8] = include_bytes!(env!("CPV_PAYLOAD_MANIFEST"));
+const PREFIX: &str = "CPV_2.0.1";
 fn hash(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }
@@ -56,9 +58,8 @@ fn cache() -> Result<PathBuf> {
     }
     bail!("无法创建运行时缓存，请检查可用空间与目录写入权限 / No writable runtime cache")
 }
-fn verified(root: &Path) -> Result<usize> {
-    // The trust anchor is the manifest inside this executable's immutable ZIP,
-    // never a replacement manifest supplied by the writable cache.
+#[cfg(not(cpv_xz_payload))]
+fn embedded_manifest() -> Result<Vec<u8>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(PAYLOAD))?;
     let mut entry = archive.by_name(&format!("{PREFIX}/manifest.json"))?;
     ensure!(
@@ -67,11 +68,16 @@ fn verified(root: &Path) -> Result<usize> {
     );
     let mut expected = Vec::new();
     entry.read_to_end(&mut expected)?;
+    Ok(expected)
+}
+
+fn verified(root: &Path, expected: &[u8]) -> Result<usize> {
+    // The embedded manifest is the trust anchor, even on cache hits.
     ensure!(
         fs::read(root.join("manifest.json"))? == expected,
         "缓存清单被改动 / Cached manifest changed"
     );
-    let manifest: serde_json::Value = serde_json::from_slice(&expected)?;
+    let manifest: serde_json::Value = serde_json::from_slice(expected)?;
     let files = manifest["files"]
         .as_object()
         .context("Missing package manifest")?;
@@ -110,6 +116,10 @@ fn verified(root: &Path) -> Result<usize> {
     Ok(files.len())
 }
 fn expand(cache: &Path, id: &str) -> Result<(PathBuf, usize)> {
+    #[cfg(cpv_xz_payload)]
+    let expected = PAYLOAD_MANIFEST;
+    #[cfg(not(cpv_xz_payload))]
+    let expected = &embedded_manifest()?;
     let target = cache.join(id);
     let lock_path = cache.join(format!("{id}.lock"));
     let lock = loop {
@@ -128,7 +138,7 @@ fn expand(cache: &Path, id: &str) -> Result<(PathBuf, usize)> {
         }
     };
     if target.is_dir() {
-        if let Ok(files) = verified(&target) {
+        if let Ok(files) = verified(&target, expected) {
             drop(lock);
             return Ok((target, files));
         }
@@ -139,10 +149,27 @@ fn expand(cache: &Path, id: &str) -> Result<(PathBuf, usize)> {
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()
     ));
     fs::create_dir(&stage)?;
-    let mut zip = zip::ZipArchive::new(Cursor::new(PAYLOAD))?;
+    let mut progress = Progress::new()?;
+    #[cfg(cpv_xz_payload)]
+    let bytes = {
+        const MAX_ARCHIVE: u64 = 512 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        lzma_rust2::XzReader::new(PAYLOAD, false)
+            .take(MAX_ARCHIVE + 1)
+            .read_to_end(&mut bytes)?;
+        ensure!(
+            bytes.len() as u64 <= MAX_ARCHIVE,
+            "Embedded archive too large"
+        );
+        bytes
+    };
+    #[cfg(cpv_xz_payload)]
+    let payload = bytes.as_slice();
+    #[cfg(not(cpv_xz_payload))]
+    let payload = PAYLOAD;
+    let mut zip = zip::ZipArchive::new(Cursor::new(payload))?;
     ensure!(zip.len() <= 4096, "Too many embedded files");
     let count = zip.len();
-    let mut progress = Progress::new()?;
     let mut total = 0u64;
     for i in 0..count {
         let mut entry = zip.by_index(i)?;
@@ -176,7 +203,7 @@ fn expand(cache: &Path, id: &str) -> Result<(PathBuf, usize)> {
         }
         progress.update(i + 1, count)?;
     }
-    let files = verified(&stage)?;
+    let files = verified(&stage, expected)?;
     if target.exists() {
         // Only rename a verified in-cache directory; never recursively delete runtime files.
         ensure!(

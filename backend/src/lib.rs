@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn complete_catalog() {
         let v: Value = serde_json::from_str(CATALOG).unwrap();
-        assert_eq!(v["effects"].as_array().unwrap().len(), 312);
+        assert_eq!(v["effects"].as_array().unwrap().len(), 315);
         assert!(v["planets"].as_array().unwrap().len() >= 273);
         for row in v["effects"].as_array().unwrap() {
             assert!(row["groupKey"].is_string());

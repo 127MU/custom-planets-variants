@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 import 'dart:ui' show AppExitResponse;
 
 import 'package:file_selector/file_selector.dart';
@@ -149,6 +150,9 @@ class _CpvAppState extends State<CpvApp>
   Timer? timer, saveTimer;
   Future<void>? closing;
   bool destroyingWindow = false;
+  ui.Image? backgroundImage;
+  int backgroundRevision = 0;
+  bool loadingBackground = false;
   final messenger = GlobalKey<ScaffoldMessengerState>();
   final navigator = GlobalKey<NavigatorState>();
   bool get en => settings['language'] == 'en';
@@ -174,6 +178,9 @@ class _CpvAppState extends State<CpvApp>
       windowManager.setPreventClose(true);
     }
     settings = Json.from(widget.initial['settings']);
+    if (settings['backgroundImage'] case final String path) {
+      loadBackground(path);
+    }
     Diagnostics.enabled = settings['diagnostics'] == true;
     state = Json.from(widget.initial['state']);
     targets = rows(widget.initial['targets']);
@@ -235,6 +242,7 @@ class _CpvAppState extends State<CpvApp>
   void dispose() {
     timer?.cancel();
     saveTimer?.cancel();
+    backgroundImage?.dispose();
     WidgetsBinding.instance.removeObserver(this);
     if (widget.nativeWindow && Platform.isWindows) {
       windowManager.removeListener(this);
@@ -320,6 +328,75 @@ class _CpvAppState extends State<CpvApp>
       }
     });
   }
+
+  Future<void> loadBackground(String? path, {bool save = false}) async {
+    final revision = ++backgroundRevision;
+    ui.Image? image;
+    try {
+      if (path != null) {
+        final file = File(path);
+        if (await file.length() > 24 * 1024 * 1024) {
+          throw const FormatException('Image too large');
+        }
+        final buffer = await ui.ImmutableBuffer.fromFilePath(path);
+        final codec = await ui.instantiateImageCodecWithSize(
+          buffer,
+          getTargetSize: (width, height) {
+            final scale = math.min(1.0, 2560 / math.max(width, height));
+            return ui.TargetImageSize(
+              width: math.max(1, (width * scale).round()),
+              height: math.max(1, (height * scale).round()),
+            );
+          },
+        );
+        try {
+          image = (await codec.getNextFrame()).image;
+        } finally {
+          codec.dispose();
+        }
+      }
+      if (!mounted || revision != backgroundRevision) {
+        image?.dispose();
+        return;
+      }
+      final old = backgroundImage;
+      setState(() => backgroundImage = image);
+      if (old != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
+      }
+      if (save) await setting({'backgroundImage': path});
+    } catch (_) {
+      if (mounted && save) {
+        note(
+          t(
+            '无法读取这张图片。请选择 24 MB 以内的图片。',
+            'Could not open this image. Choose an image under 24 MB.',
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> chooseBackground() async {
+    setState(() => loadingBackground = true);
+    try {
+      final file = await openFile(
+        acceptedTypeGroups: const [
+          XTypeGroup(
+            label: 'Images',
+            extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'],
+          ),
+        ],
+      );
+      if (file != null && mounted) await loadBackground(file.path, save: true);
+    } catch (_) {
+      if (mounted) note(t('无法打开图片选择器', 'Could not open the image picker'));
+    } finally {
+      if (mounted) setState(() => loadingBackground = false);
+    }
+  }
+
+  double get backgroundImageOpacity => dark ? .28 : .46;
 
   Future<void> importPlans() async {
     final file = await openFile(
@@ -449,6 +526,8 @@ class _CpvAppState extends State<CpvApp>
     final radius = BorderRadius.circular(24);
     return LiquidGlassSurface(
       backgroundGradient: backgroundGradient,
+      backgroundImage: backgroundImage,
+      backgroundImageOpacity: backgroundImageOpacity,
       tint: tint,
       dark: dark,
       borderRadius: radius,
@@ -527,45 +606,64 @@ class _CpvAppState extends State<CpvApp>
         builder: (context) => Scaffold(
           body: DecoratedBox(
             decoration: BoxDecoration(gradient: backgroundGradient),
-            child: SafeArea(
-              child: LayoutBuilder(
-                builder: (context, box) {
-                  final wide = box.maxWidth >= 960;
-                  return Padding(
-                    padding: EdgeInsets.all(wide ? 22 : 12),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        SizedBox(width: wide ? 216 : 78, child: sidebar(wide)),
-                        SizedBox(width: wide ? 24 : 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              topbar(),
-                              const SizedBox(height: 22),
-                              Expanded(
-                                child: AnimatedSwitcher(
-                                  duration: const Duration(milliseconds: 220),
-                                  child: KeyedSubtree(
-                                    key: ValueKey(page),
-                                    child: switch (page) {
-                                      0 => plansPage(),
-                                      1 => catalogPage(),
-                                      2 => connectionPage(),
-                                      _ => settingsPage(),
-                                    },
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (backgroundImage != null)
+                  IgnorePointer(
+                    child: RawImage(
+                      image: backgroundImage,
+                      fit: BoxFit.cover,
+                      opacity: AlwaysStoppedAnimation(backgroundImageOpacity),
                     ),
-                  );
-                },
-              ),
+                  ),
+                SafeArea(
+                  child: LayoutBuilder(
+                    builder: (context, box) {
+                      final wide = box.maxWidth >= 960;
+                      return Padding(
+                        padding: EdgeInsets.all(wide ? 22 : 12),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            SizedBox(
+                              width: wide ? 216 : 78,
+                              child: sidebar(wide),
+                            ),
+                            SizedBox(width: wide ? 24 : 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  topbar(),
+                                  const SizedBox(height: 22),
+                                  Expanded(
+                                    child: AnimatedSwitcher(
+                                      duration: const Duration(
+                                        milliseconds: 220,
+                                      ),
+                                      child: KeyedSubtree(
+                                        key: ValueKey(page),
+                                        child: switch (page) {
+                                          0 => plansPage(),
+                                          1 => catalogPage(),
+                                          2 => connectionPage(),
+                                          4 => inventoryPage(),
+                                          _ => settingsPage(),
+                                        },
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
             ),
           ),
         ),
@@ -579,12 +677,14 @@ class _CpvAppState extends State<CpvApp>
       t('效果目录', 'Effect library'),
       t('连接', 'Connection'),
       t('设置', 'Settings'),
+      t('军械库', 'Armory'),
     ];
     final icons = [
       Icons.dashboard_outlined,
       Icons.auto_awesome_mosaic_outlined,
       Icons.cable_rounded,
       Icons.tune_rounded,
+      Icons.inventory_2_outlined,
     ];
     return glass(
       Column(
@@ -612,7 +712,7 @@ class _CpvAppState extends State<CpvApp>
 
             const SizedBox(height: 6),
             const Text(
-              '2.0.0',
+              productVersion,
               style: TextStyle(fontSize: 10, letterSpacing: 1.8),
             ),
           ],
@@ -705,7 +805,7 @@ class _CpvAppState extends State<CpvApp>
       Expanded(
         child: windowDrag(
           Text(
-            '${t('工作台', 'Workspace')}  /  ${[t('星球方案', 'Planet plans'), t('效果目录', 'Effect library'), t('连接', 'Connection'), t('设置', 'Settings')][page]}',
+            '${t('工作台', 'Workspace')}  /  ${[t('星球方案', 'Planet plans'), t('效果目录', 'Effect library'), t('连接', 'Connection'), t('设置', 'Settings'), t('军械库', 'Armory')][page]}',
             style: const TextStyle(fontSize: 13),
           ),
         ),
@@ -1550,6 +1650,12 @@ class _CpvAppState extends State<CpvApp>
     }
   }
 
+  Widget inventoryPage() => _InventoryPage(
+    core: widget.core,
+    english: en,
+    surface: (child) => glass(child),
+  );
+
   Widget settingsPage() => ListView(
     padding: const EdgeInsets.only(bottom: 24),
     children: [
@@ -1624,6 +1730,32 @@ class _CpvAppState extends State<CpvApp>
                             : null,
                       ),
                     ),
+                ],
+              ),
+            ),
+            const Divider(height: 32),
+            settingRow(
+              t('自定义背景', 'Custom background'),
+              t(
+                '使用本地图片作为背景，玻璃卡片也会使用这张图。',
+                'Use a local image for the workspace and glass cards.',
+              ),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: loadingBackground ? null : chooseBackground,
+                    icon: const Icon(Icons.image_outlined),
+                    label: Text(t('选择图片', 'Choose image')),
+                  ),
+                  TextButton(
+                    onPressed:
+                        loadingBackground || settings['backgroundImage'] == null
+                        ? null
+                        : () => loadBackground(null, save: true),
+                    child: Text(t('恢复默认', 'Restore default')),
+                  ),
                 ],
               ),
             ),
@@ -1768,7 +1900,7 @@ class _CpvAppState extends State<CpvApp>
             ),
             const SizedBox(height: 12),
             Text(
-              '$title · 2.0.0\nRust + Flutter · Morrow glass components\nAGPL-3.0-only',
+              '$title · $productVersion\nRust + Flutter · Morrow glass components\nAGPL-3.0-only',
             ),
             const SizedBox(height: 14),
             Text('${t('作者', 'Author')}: 127MU'),
@@ -1840,6 +1972,524 @@ class _CpvAppState extends State<CpvApp>
           ],
         ),
       );
+}
+
+class _InventoryPage extends StatefulWidget {
+  const _InventoryPage({
+    required this.core,
+    required this.english,
+    required this.surface,
+  });
+
+  final CpvApi core;
+  final bool english;
+  final Widget Function(Widget) surface;
+
+  @override
+  State<_InventoryPage> createState() => _InventoryPageState();
+}
+
+class _InventoryPageState extends State<_InventoryPage> {
+  final add = TextEditingController();
+  final remove = TextEditingController();
+  final customization = TextEditingController();
+  List<Json> weapons = [], attachments = [], attachmentChanges = [];
+  bool enabled = false, busy = true, loaded = false;
+  String? message;
+  String t(String zh, String en) => widget.english ? en : zh;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    try {
+      final results = await Future.wait([
+        widget.core.call('inventory_preview'),
+        rootBundle.loadString('assets/armory_catalog.json'),
+      ]);
+      final plan = Json.from(results[0]);
+      final catalog = Json.from(jsonDecode(results[1] as String));
+      if (!mounted) return;
+      add.text = (plan['items'] as List).map((row) => row['mixId']).join(', ');
+      remove.text = (plan['remove'] as List).join(', ');
+      final overrides = plan['customization'] as List;
+      customization.text = overrides.isEmpty
+          ? ''
+          : const JsonEncoder.withIndent('  ').convert(overrides);
+      setState(() {
+        weapons = _CpvAppState.rows(catalog['weapons']);
+        attachments = _CpvAppState.rows(catalog['attachments']);
+        attachmentChanges = _CpvAppState.rows(plan['attachmentChanges'] ?? []);
+        enabled = plan['enabled'] == true;
+        loaded = true;
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(
+          () => message = t('无法读取军械库方案', 'Could not load the armory plan'),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  String hexId(int value) =>
+      '0x${value.toRadixString(16).toUpperCase().padLeft(8, '0')}';
+
+  String weaponName(Json weapon) {
+    final name =
+        (widget.english ? weapon['name'] : weapon['zh'] ?? weapon['name'])
+            as String;
+    final code = weapon['code'] as String;
+    final includesCode =
+        code.isNotEmpty &&
+        name.toLowerCase().startsWith(code.toLowerCase()) &&
+        (name.length == code.length ||
+            !RegExp(r'[a-zA-Z0-9]').hasMatch(name[code.length]));
+    final label = [
+      if (!includesCode) code,
+      name,
+    ].where((s) => s.isNotEmpty).join(' ');
+    return label.isEmpty ? t('未命名武器', 'Unnamed weapon') : label;
+  }
+
+  String weaponKind(Json weapon) => switch (weapon['kind']) {
+    'primary' => t('主武器', 'Primary'),
+    'secondary' => t('副武器', 'Secondary'),
+    'throwable' => t('投掷物', 'Throwable'),
+    _ => t('支援武器', 'Support weapon'),
+  };
+
+  bool hasInventoryId(Json weapon) =>
+      weapon['id'] != 0 && weapon['kind'] != 'support';
+
+  String attachmentName(Json attachment) {
+    if (attachment['id'] == 0) return t('空配件（占位）', 'Empty slot marker');
+    final localized = attachment['zh'] as String?;
+    if (!widget.english && localized != null && localized.isNotEmpty) {
+      return localized;
+    }
+    final names = (attachment['names'] as List).cast<String>();
+    return names.isEmpty ? t('未命名配件', 'Unnamed attachment') : names.join(' / ');
+  }
+
+  String slotName(int slot) => switch (slot) {
+    1 => t('下挂', 'Underbarrel'),
+    2 => t('瞄具', 'Optics'),
+    3 => t('涂装', 'Paint'),
+    4 => t('枪口', 'Muzzle'),
+    5 => t('弹匣或散热器', 'Magazine or heatsink'),
+    6 => t('弹种', 'Ammo type'),
+    7 => t('备用弹种', 'Alternate ammo'),
+    8 => t('内部组件', 'Internals'),
+    9 => t('扳机', 'Trigger'),
+    _ => t('未知槽位', 'Unknown slot'),
+  };
+
+  Future<Json?> pickCatalog(
+    String title,
+    List<Json> rows, {
+    required bool weapon,
+  }) async {
+    var query = '';
+    return showDialog<Json>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, refresh) {
+          final filtered = <({Json item, String name, String detail})>[];
+          for (final item in rows) {
+            final name = weapon ? weaponName(item) : attachmentName(item);
+            final id = item['id'] as int;
+            final detail = weapon
+                ? [
+                    weaponKind(item),
+                    if (id != 0) hexId(id) else item['entity'],
+                    if (!hasInventoryId(item)) t('仅查看', 'Browse only'),
+                  ].join(' · ')
+                : [
+                    hexId(id),
+                    ...(item['slots'] as List).cast<int>().map(slotName),
+                  ].join(' · ');
+            final aliases = (item['names'] as List?)?.join(' ') ?? '';
+            final searchable =
+                '$name $detail $id ${item['name'] ?? ''} ${item['zh'] ?? ''} $aliases'
+                    .toLowerCase();
+            final compact = searchable.replaceAll(RegExp(r'\s+'), '');
+            if (query
+                .trim()
+                .toLowerCase()
+                .split(RegExp(r'\s+'))
+                .every(
+                  (word) => searchable.contains(word) || compact.contains(word),
+                )) {
+              filtered.add((item: item, name: name, detail: detail));
+            }
+          }
+          return AlertDialog(
+            title: Text(title),
+            content: SizedBox(
+              width: 580,
+              height: math.min(450.0, MediaQuery.sizeOf(context).height * .58),
+              child: Column(
+                children: [
+                  TextField(
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      prefixIcon: const Icon(Icons.search),
+                      hintText: t(
+                        '搜索名称、型号、槽位或 ID',
+                        'Search name, model, slot or ID',
+                      ),
+                    ),
+                    onChanged: (value) => refresh(() => query = value),
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: filtered.isEmpty
+                        ? Center(
+                            child: Text(t('没有匹配条目', 'No matching entries')),
+                          )
+                        : ListView.builder(
+                            itemCount: filtered.length,
+                            itemBuilder: (context, index) {
+                              final row = filtered[index];
+                              return ListTile(
+                                title: Text(row.name),
+                                subtitle: Text(row.detail),
+                                onTap: () => Navigator.pop(context, row.item),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text(t('取消', 'Cancel')),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> chooseWeapon(TextEditingController destination) async {
+    final weapon = await pickCatalog(
+      t('选择武器或投掷物', 'Choose weapon or throwable'),
+      weapons,
+      weapon: true,
+    );
+    if (!mounted || weapon == null) return;
+    if (!hasInventoryId(weapon)) {
+      setState(
+        () => message = t(
+          '此条目没有可用于库存预览的物品 ID。',
+          'This entry has no usable inventory item ID.',
+        ),
+      );
+      return;
+    }
+    try {
+      final ids = {...parseIds(destination.text), weapon['id'] as int};
+      setState(() {
+        destination.text = ids.join(', ');
+        message = null;
+      });
+    } on FormatException catch (error) {
+      setState(() => message = error.message);
+    }
+  }
+
+  Future<void> browseAttachments() async {
+    final attachment = await pickCatalog(
+      t('配件目录', 'Attachment catalog'),
+      attachments,
+      weapon: false,
+    );
+    if (attachment == null || !mounted) return;
+    final id = hexId(attachment['id'] as int);
+    await Clipboard.setData(ClipboardData(text: id));
+    if (mounted) {
+      setState(
+        () => message =
+            '${attachmentName(attachment)} · $id · ${t('已复制 ID', 'ID copied')}',
+      );
+    }
+  }
+
+  Future<void> addAttachmentChange() async {
+    final weapon = await pickCatalog(
+      t('选择要改配件的武器', 'Choose weapon to customize'),
+      weapons.where(hasInventoryId).toList(),
+      weapon: true,
+    );
+    if (weapon == null || !mounted) return;
+    final from = await pickCatalog(
+      t('选择原有配件', 'Choose existing attachment'),
+      attachments.where((item) => (item['slots'] as List).isNotEmpty).toList(),
+      weapon: false,
+    );
+    if (from == null || !mounted) return;
+    final slots = (from['slots'] as List).toSet();
+    final candidates = attachments
+        .where(
+          (item) =>
+              item['id'] != from['id'] &&
+              (item['slots'] as List).any(slots.contains),
+        )
+        .toList();
+    final to = await pickCatalog(
+      t('选择同槽位的替换配件', 'Choose replacement in the same slot'),
+      candidates,
+      weapon: false,
+    );
+    if (to == null || !mounted) return;
+    setState(() {
+      attachmentChanges.removeWhere(
+        (rule) => rule['weapon'] == weapon['id'] && rule['from'] == from['id'],
+      );
+      attachmentChanges.add({
+        'weapon': weapon['id'],
+        'from': from['id'],
+        'to': to['id'],
+      });
+      message = null;
+    });
+  }
+
+  String catalogLabel(List<Json> rows, int id, String Function(Json) name) {
+    for (final row in rows) {
+      if (row['id'] == id) return name(row);
+    }
+    return hexId(id);
+  }
+
+  String selectedWeapons(String text) {
+    try {
+      return parseIds(
+        text,
+      ).map((id) => catalogLabel(weapons, id, weaponName)).join('、');
+    } on FormatException {
+      return '';
+    }
+  }
+
+  List<int> parseIds(String input) {
+    final ids = <int>{};
+    for (final value
+        in input.split(RegExp(r'[\s,，]+')).where((v) => v.isNotEmpty)) {
+      final id = int.tryParse(value);
+      if (id == null || id < 1 || id > 0xffffffff) {
+        throw FormatException(t('无效的物品 ID', 'Invalid item ID'));
+      }
+      ids.add(id);
+    }
+    return ids.toList();
+  }
+
+  Future<void> save({bool disable = false}) async {
+    setState(() {
+      busy = true;
+      message = null;
+    });
+    try {
+      final plan = disable
+          ? Json.from(await widget.core.call('inventory_preview'))
+          : <String, dynamic>{
+              'enabled': enabled,
+              'items': [
+                for (final id in parseIds(add.text))
+                  {'mixId': id, 'amount': 1, 'isDiscovered': false},
+              ],
+              'remove': parseIds(remove.text),
+              'customization': customization.text.trim().isEmpty
+                  ? []
+                  : jsonDecode(customization.text),
+              if (attachmentChanges.isNotEmpty)
+                'attachmentChanges': attachmentChanges,
+            };
+      if (disable) plan['enabled'] = false;
+      await widget.core.call('inventory_preview', plan);
+      if (!mounted) return;
+      setState(() {
+        if (disable) enabled = false;
+        message = t(
+          '已保存。游戏下次读取库存时生效。',
+          'Saved. Applies the next time the game requests inventory.',
+        );
+      });
+    } catch (error) {
+      if (mounted) setState(() => message = Diagnostics.safe(error.toString()));
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    add.dispose();
+    remove.dispose();
+    customization.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => ListView(
+    padding: const EdgeInsets.only(bottom: 20),
+    children: [
+      Text(
+        t('军械库', 'Armory'),
+        style: Theme.of(context).textTheme.headlineMedium,
+      ),
+      const SizedBox(height: 14),
+      widget.surface(
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(
+                t('本地库存预览（实验性）', 'Local inventory preview (experimental)'),
+              ),
+              subtitle: Text(
+                t(
+                  '需要开启连接页的代理。保存后在游戏下次读取库存时应用。',
+                  'Start the proxy on the Connection page. Changes apply on the next inventory request.',
+                ),
+              ),
+              value: enabled,
+              onChanged: busy || !loaded
+                  ? null
+                  : (value) => setState(() => enabled = value),
+            ),
+            Text(
+              t(
+                '仅改变本机看到的军械库。物品可见性和装备结果取决于游戏，建议一次验证一个 ID。',
+                'Changes only the local armory view. Visibility and equipping depend on the game. Try one ID at a time.',
+              ),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: add,
+              enabled: loaded && !busy,
+              onChanged: (_) => setState(() {}),
+              decoration: InputDecoration(
+                labelText: t('预览拥有的物品 ID', 'Preview item IDs'),
+                hintText: t(
+                  '逗号或空格分隔，可输入 0x 十六进制',
+                  'Comma or space separated. 0x hex accepted.',
+                ),
+                suffixIcon: TextButton(
+                  onPressed: loaded && !busy ? () => chooseWeapon(add) : null,
+                  child: Text(t('选武器', 'Pick weapon')),
+                ),
+              ),
+            ),
+            if (selectedWeapons(add.text).isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(selectedWeapons(add.text)),
+              ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: remove,
+              enabled: loaded && !busy,
+              decoration: InputDecoration(
+                labelText: t('隐藏的物品 ID', 'Hide item IDs'),
+                suffixIcon: TextButton(
+                  onPressed: loaded && !busy
+                      ? () => chooseWeapon(remove)
+                      : null,
+                  child: Text(t('选武器', 'Pick weapon')),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton(
+                  onPressed: loaded && !busy ? browseAttachments : null,
+                  child: Text(t('浏览配件', 'Browse attachments')),
+                ),
+                OutlinedButton(
+                  onPressed: loaded && !busy ? addAttachmentChange : null,
+                  child: Text(t('添加配件替换', 'Add attachment replacement')),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              t(
+                '替换仅在该武器已有的配件方案中找到原配件时生效。同槽位的配件也可能不兼容。',
+                'A replacement applies only to presets containing the selected attachment. Items in the same slot may still be incompatible.',
+              ),
+            ),
+            for (final (index, rule) in attachmentChanges.indexed)
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text(catalogLabel(weapons, rule['weapon'], weaponName)),
+                subtitle: Text(
+                  '${catalogLabel(attachments, rule['from'], attachmentName)} → '
+                  '${catalogLabel(attachments, rule['to'], attachmentName)}',
+                ),
+                trailing: IconButton(
+                  tooltip: t('移除这项替换', 'Remove this replacement'),
+                  onPressed: busy
+                      ? null
+                      : () => setState(() => attachmentChanges.removeAt(index)),
+                  icon: const Icon(Icons.delete_outline),
+                ),
+              ),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: Text(t('配件预览（高级）', 'Customization preview (advanced)')),
+              children: [
+                TextField(
+                  controller: customization,
+                  enabled: loaded && !busy,
+                  minLines: 3,
+                  maxLines: 8,
+                  decoration: InputDecoration(
+                    labelText: t('配件 JSON 数组', 'Customization JSON array'),
+                    helperText:
+                        'mixId32, index, activeIndex, slots[8], modes[4]',
+                  ),
+                ),
+              ],
+            ),
+            Wrap(
+              spacing: 10,
+              runSpacing: 8,
+              children: [
+                FilledButton(
+                  onPressed: busy || !loaded ? null : () => save(),
+                  child: Text(t('保存方案', 'Save plan')),
+                ),
+                OutlinedButton(
+                  onPressed: busy || !loaded ? null : () => save(disable: true),
+                  child: Text(t('关闭预览', 'Disable preview')),
+                ),
+              ],
+            ),
+            if (message != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 12),
+                child: Text(message!),
+              ),
+          ],
+        ),
+      ),
+    ],
+  );
 }
 
 class PlanetPicker extends StatefulWidget {

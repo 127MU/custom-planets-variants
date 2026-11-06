@@ -34,7 +34,13 @@ def main():
 
     core=Core()
     try:
-        initial=core.call('bootstrap');assert not initial['state']['active'];assert len(initial['catalog']['effects'])==312
+        initial=core.call('bootstrap');assert not initial['state']['active'];assert len(initial['catalog']['effects'])==315
+        armory = core.call('inventory_preview')
+        assert armory == {'enabled': True, 'items': [], 'remove': [], 'customization': []}
+        armory['items'] = [{'mixId': 2112173638, 'amount': 1, 'isDiscovered': False}]
+        assert core.call('inventory_preview', armory) == armory
+        core.call('inventory_preview', {**armory, 'remove': [-1]}, error=True)
+        assert core.call('inventory_preview') == armory
         core.call('save_target',{'target':{'planet':64,'effects':[1346,1431]}})
         saved=(profile/'war-targets.json').read_bytes()
         core.call('save_target',{'target':{'planet':-1,'effects':[]}},error=True)
@@ -60,6 +66,7 @@ def main():
         assert not (profile/'war-proxy/steam-proxy.ini').exists()
         core.close();core=Core()
         reloaded=core.call('bootstrap');assert reloaded['settings']['diagnostics'] is True;assert reloaded['settings']['language']=='en';assert reloaded['targets'][0]['effects']==[1346,1431];assert not reloaded['state']['active']
+        assert core.call('inventory_preview') == armory
         if args.runtime:
             core.call('settings',{'runtime':str(args.runtime.resolve())})
             core.call('prepare_certificate')

@@ -11,7 +11,8 @@ A standalone planet and variant configuration tool for Helldivers 2. Search plan
 - **Effect library:** bilingual search, categories, multi-selection and selected-only filtering. Drag the category strip with a mouse, use the wheel or drag its horizontal scrollbar.
 - **Operations:** campaign type, enemy faction, missing-region initialization and defense settings.
 - **Weather presets:** documented Exostorm effects; experimental candidates are labeled in the interface.
-- **Appearance:** Chinese / English, light / dark / system mode, accent colors and frosted, liquid-glass or solid materials.
+- **Appearance:** custom background images, Chinese / English, light / dark / system mode, accent colors and frosted, liquid-glass or solid materials.
+- **Armory:** search for weapons and attachments by name, model or ID. Saved plans apply on the next inventory request. Attachment replacements match the original attachment in existing presets. Catalog data comes from [hd2-datamined](https://github.com/deepseekv41flash/hd2-datamined/blob/master/docs/tables/WEAPON-CUSTOMIZATION-26251122.md). In-game equip behavior is experimental.
 - **Connection management:** local certificate generation, explicitly confirmed current-user trust, Steam launch bridge and an optional upstream HTTP proxy.
 - **Diagnostics:** check profile access, application integrity, certificate and proxy state, then export a local JSON report.
 
@@ -71,7 +72,7 @@ Prepare an official-mitmproxy-based Windows Python runtime containing `python.ex
 
 ```powershell
 python tools/package-rust.py --output dist/release --proxy-runtime C:/path/to/mitmproxy-runtime
-.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.0_Windows.zip
+.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.1_Windows.zip
 ```
 
 The launcher is written to `backend/target/release/cpv-launcher.exe`; copy and rename it to `自定义星球和变种.exe`. Python runtimes and generated binaries are not committed. Packaging verifies runtime hashes and required icon glyphs. If it detects missing glyphs, run `flutter clean` and rebuild.
