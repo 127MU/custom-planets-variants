@@ -36,10 +36,20 @@ fn main() {
         .unwrap();
     let manifest = out.join("launcher.manifest");
     fs::write(&manifest,r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0"><trustInfo xmlns="urn:schemas-microsoft-com:asm.v3"><security><requestedPrivileges><requestedExecutionLevel level="asInvoker" uiAccess="false"/></requestedPrivileges></security></trustInfo><application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings><longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware><dpiAware xmlns="http://schemas.microsoft.com/SMI/2005/WindowsSettings">true</dpiAware></windowsSettings></application></assembly>"#).unwrap();
+    let version = env::var("CARGO_PKG_VERSION").unwrap();
+    let mut parts = version
+        .split('.')
+        .map(|part| part.parse::<u32>().unwrap_or(0));
+    let quad = format!(
+        "{},{},{},0",
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0),
+        parts.next().unwrap_or(0)
+    );
     let rc = out.join("launcher.rc");
     let res = out.join("launcher.res");
     let escaped = |p: PathBuf| p.to_string_lossy().replace('\\', "\\\\");
-    fs::write(&rc,format!("#pragma code_page(65001)\n1 ICON \"{}\"\n1 24 \"{}\"\n1 VERSIONINFO FILEVERSION 2,0,1,0 PRODUCTVERSION 2,0,1,0 FILEOS 0x40004 FILETYPE 1 BEGIN BLOCK \"StringFileInfo\" BEGIN BLOCK \"040904b0\" BEGIN VALUE \"FileDescription\", \"自定义星球和变种\\0\" VALUE \"ProductName\", \"自定义星球和变种\\0\" VALUE \"ProductVersion\", \"2.0.1\\0\" VALUE \"LegalCopyright\", \"CPV contributors; AGPL-3.0-only\\0\" END END BLOCK \"VarFileInfo\" BEGIN VALUE \"Translation\", 0x409, 1200 END END\n",escaped(icon),escaped(manifest))).unwrap();
+    fs::write(&rc,format!("#pragma code_page(65001)\n1 ICON \"{}\"\n1 24 \"{}\"\n1 VERSIONINFO FILEVERSION {quad} PRODUCTVERSION {quad} FILEOS 0x40004 FILETYPE 1 BEGIN BLOCK \"StringFileInfo\" BEGIN BLOCK \"040904b0\" BEGIN VALUE \"FileDescription\", \"自定义星球和变种\\0\" VALUE \"ProductName\", \"自定义星球和变种\\0\" VALUE \"ProductVersion\", \"{version}\\0\" VALUE \"LegalCopyright\", \"CPV contributors; AGPL-3.0-only\\0\" END END BLOCK \"VarFileInfo\" BEGIN VALUE \"Translation\", 0x409, 1200 END END\n",escaped(icon),escaped(manifest))).unwrap();
     let status = Command::new(env::var_os("RC").unwrap_or_else(|| "rc.exe".into()))
         .arg("/nologo")
         .arg(format!("/fo{}", res.display()))

@@ -9,10 +9,11 @@ A standalone planet and variant configuration tool for Helldivers 2. Search plan
 
 - **Planet plans:** search names or IDs, add, edit, enable, import and export plans.
 - **Effect library:** bilingual search, categories, multi-selection and selected-only filtering. Drag the category strip with a mouse, use the wheel or drag its horizontal scrollbar.
-- **Operations:** campaign type, enemy faction, missing-region initialization and defense settings.
+- **Operations:** campaign type, operation count, enemy faction, missing-region initialization and defense settings. City and special-planet campaigns need enough operation slots (default 20).
+- **Temporary stratagems:** select multiple temporary stratagems per planet. The game has its own limit, and extra selections may not work in-game.
 - **Weather presets:** documented Exostorm effects; experimental candidates are labeled in the interface.
 - **Appearance:** custom background images, Chinese / English, light / dark / system mode, accent colors and frosted, liquid-glass or solid materials.
-- **Armory:** search for weapons and attachments by name, model or ID. Saved plans apply on the next inventory request. Attachment replacements match the original attachment in existing presets. Catalog data comes from [hd2-datamined](https://github.com/deepseekv41flash/hd2-datamined/blob/master/docs/tables/WEAPON-CUSTOMIZATION-26251122.md). In-game equip behavior is experimental.
+- **Armory:** search and select primary weapons, secondary weapons and throwables, or preview them in bulk. Saved plans apply when the game logs in again and fetches the item catalog and inventory. Missing catalog entries use a template from the same equipment category. Unnamed entries are experimental. Attachment replacements match the original attachment in existing presets. [Catalog data](https://github.com/deepseekv41flash/hd2-datamined/blob/master/docs/tables/WEAPON-CUSTOMIZATION-26251122.md) · [Unlock map](https://github.com/deepseekv41flash/hd2-network-proxy/blob/master/docs/UNLOCK-MAP-2026-11-06.md)
 - **Connection management:** local certificate generation, explicitly confirmed current-user trust, Steam launch bridge and an optional upstream HTTP proxy.
 - **Diagnostics:** check profile access, application integrity, certificate and proxy state, then export a local JSON report.
 
@@ -71,8 +72,8 @@ cd ..
 Prepare an official-mitmproxy-based Windows Python runtime containing `python.exe`, `proxy_main.py`, dependencies and a `runtime.json` hash manifest, then package:
 
 ```powershell
-python tools/package-rust.py --output dist/release --proxy-runtime C:/path/to/mitmproxy-runtime
-.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.1_Windows.zip
+python tools/package-rust.py --output dist/release --proxy-runtime C:/path/to/mitmproxy-runtime --solid-payload build/cpv-payload.xz
+.\tools\build-rust.ps1 -Payload build/cpv-payload.xz -PayloadManifest dist/release/CPV_2.0.2/manifest.json
 ```
 
 The launcher is written to `backend/target/release/cpv-launcher.exe`; copy and rename it to `自定义星球和变种.exe`. Python runtimes and generated binaries are not committed. Packaging verifies runtime hashes and required icon glyphs. If it detects missing glyphs, run `flutter clean` and rebuild.

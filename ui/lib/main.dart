@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'dart:ui' show AppExitResponse;
 
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/services.dart';
@@ -16,6 +17,8 @@ import 'package:url_launcher/url_launcher.dart';
 import 'updates.dart';
 import 'core.dart';
 import 'diagnostics.dart';
+import 'planet_catalog.dart';
+import 'version.dart';
 import 'morrow/liquid_glass.dart';
 
 typedef Json = Map<String, dynamic>;
@@ -127,11 +130,16 @@ class CpvApp extends StatefulWidget {
     required this.initial,
     this.nativeWindow = true,
     this.updates,
+    this.version,
   });
   final CpvApi core;
   final Json initial;
   final bool nativeWindow;
   final UpdateClient? updates;
+
+  /// 发行包清单里的版本；缺省时从可执行文件同级的 `manifest.json` 读取。
+  /// 测试可以显式注入。
+  final String? version;
   @override
   State<CpvApp> createState() => _CpvAppState();
 }
@@ -139,7 +147,10 @@ class CpvApp extends StatefulWidget {
 class _CpvAppState extends State<CpvApp>
     with WidgetsBindingObserver, WindowListener {
   late Json settings, state;
-  late List<Json> targets, effects, planets;
+  late List<Json> targets, effects;
+  late final ValueNotifier<List<Json>> planetCatalog;
+  List<Json> get planets => planetCatalog.value;
+  late final String currentVersion;
   int page = 0;
   int settingsRevision = 0;
   bool working = false, polling = false;
@@ -173,6 +184,7 @@ class _CpvAppState extends State<CpvApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    currentVersion = widget.version ?? readReleaseVersion();
     if (widget.nativeWindow && Platform.isWindows) {
       windowManager.addListener(this);
       windowManager.setPreventClose(true);
@@ -185,11 +197,12 @@ class _CpvAppState extends State<CpvApp>
     state = Json.from(widget.initial['state']);
     targets = rows(widget.initial['targets']);
     effects = rows(widget.initial['catalog']['effects']);
-    planets = rows(widget.initial['catalog']['planets']);
+    planetCatalog = ValueNotifier(rows(widget.initial['catalog']['planets']));
     timer = Timer.periodic(const Duration(seconds: 1), (_) => poll());
     if (widget.nativeWindow) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         checkForUpdates(automatic: true);
+        refreshPlanets();
       });
     }
   }
@@ -243,6 +256,7 @@ class _CpvAppState extends State<CpvApp>
     timer?.cancel();
     saveTimer?.cancel();
     backgroundImage?.dispose();
+    planetCatalog.dispose();
     WidgetsBinding.instance.removeObserver(this);
     if (widget.nativeWindow && Platform.isWindows) {
       windowManager.removeListener(this);
@@ -261,7 +275,7 @@ class _CpvAppState extends State<CpvApp>
         if (mounted) {
           setState(() {
             effects = rows(catalog['effects']);
-            planets = rows(catalog['planets']);
+            planetCatalog.value = rows(catalog['planets']);
           });
         }
       }
@@ -274,6 +288,21 @@ class _CpvAppState extends State<CpvApp>
       }
     } finally {
       polling = false;
+    }
+  }
+
+  Future<void> refreshPlanets() async {
+    try {
+      final catalog = await fetchPlanetCatalog();
+      if (!mounted || closing != null) return;
+      final updated = await widget.core.call('save_planet_catalog', catalog);
+      if (mounted && closing == null) {
+        setState(() => planetCatalog.value = rows(updated));
+      }
+    } catch (error) {
+      Diagnostics.record('planet_catalog_unavailable', {
+        'error': error.toString(),
+      });
     }
   }
 
@@ -429,7 +458,8 @@ class _CpvAppState extends State<CpvApp>
   Future<void> addPlanet() async {
     final p = await showDialog<Json>(
       context: navigator.currentState!.overlay!.context,
-      builder: (context) => PlanetPicker(planets: planets, en: en),
+      builder: (context) =>
+          PlanetPicker(planets: planets, live: planetCatalog, en: en),
     );
     if (p != null) {
       final existing = targets.where((e) => e['planet'] == p['id']);
@@ -442,6 +472,7 @@ class _CpvAppState extends State<CpvApp>
                 'enabled': true,
                 'owner': 0,
                 'campaign': false,
+                'force_open': false,
                 'campaign_type': 0,
                 'campaign_race': 0,
                 'open_regions': false,
@@ -450,6 +481,7 @@ class _CpvAppState extends State<CpvApp>
                 'defense_level': 20,
                 'defense_hours': 48,
                 'defense_count': 38,
+                'campaign_count': 20,
               },
       );
     }
@@ -711,9 +743,9 @@ class _CpvAppState extends State<CpvApp>
             const SizedBox(height: 12),
 
             const SizedBox(height: 6),
-            const Text(
-              productVersion,
-              style: TextStyle(fontSize: 10, letterSpacing: 1.8),
+            Text(
+              currentVersion.isEmpty ? '—' : currentVersion,
+              style: const TextStyle(fontSize: 10, letterSpacing: 1.8),
             ),
           ],
           const SizedBox(height: 34),
@@ -1486,7 +1518,8 @@ class _CpvAppState extends State<CpvApp>
       final result = await (widget.updates ?? UpdateClient()).check();
       if (!mounted) return;
       setState(() => latestUpdate = result);
-      if (result.newerThan(productVersion)) {
+      // 开发环境读不到发行包清单时按 0.0.0 比较，仍能提示新版本。
+      if (result.newerThan(currentVersion.isEmpty ? '0.0.0' : currentVersion)) {
         while (mounted &&
             closing == null &&
             (working || navigator.currentState?.canPop() == true)) {
@@ -1504,7 +1537,10 @@ class _CpvAppState extends State<CpvApp>
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text('${t('当前版本', 'Current version')}: $productVersion'),
+                    Text(
+                      '${t('当前版本', 'Current version')}: '
+                      '${currentVersion.isEmpty ? '—' : currentVersion}',
+                    ),
                     const SizedBox(height: 16),
                     SelectableText(
                       result.notes.isEmpty
@@ -1653,6 +1689,7 @@ class _CpvAppState extends State<CpvApp>
   Widget inventoryPage() => _InventoryPage(
     core: widget.core,
     english: en,
+    proxyState: state,
     surface: (child) => glass(child),
   );
 
@@ -1900,7 +1937,8 @@ class _CpvAppState extends State<CpvApp>
             ),
             const SizedBox(height: 12),
             Text(
-              '$title · $productVersion\nRust + Flutter · Morrow glass components\nAGPL-3.0-only',
+              '$title${currentVersion.isEmpty ? '' : ' · $currentVersion'}\n'
+              'Rust + Flutter · Morrow glass components\nAGPL-3.0-only',
             ),
             const SizedBox(height: 14),
             Text('${t('作者', 'Author')}: 127MU'),
@@ -1978,11 +2016,13 @@ class _InventoryPage extends StatefulWidget {
   const _InventoryPage({
     required this.core,
     required this.english,
+    required this.proxyState,
     required this.surface,
   });
 
   final CpvApi core;
   final bool english;
+  final Json proxyState;
   final Widget Function(Widget) surface;
 
   @override
@@ -1991,10 +2031,10 @@ class _InventoryPage extends StatefulWidget {
 
 class _InventoryPageState extends State<_InventoryPage> {
   final add = TextEditingController();
-  final remove = TextEditingController();
   final customization = TextEditingController();
   List<Json> weapons = [], attachments = [], attachmentChanges = [];
   bool enabled = false, busy = true, loaded = false;
+  bool unlockAllWeapons = false;
   String? message;
   String t(String zh, String en) => widget.english ? en : zh;
 
@@ -2014,7 +2054,6 @@ class _InventoryPageState extends State<_InventoryPage> {
       final catalog = Json.from(jsonDecode(results[1] as String));
       if (!mounted) return;
       add.text = (plan['items'] as List).map((row) => row['mixId']).join(', ');
-      remove.text = (plan['remove'] as List).join(', ');
       final overrides = plan['customization'] as List;
       customization.text = overrides.isEmpty
           ? ''
@@ -2024,6 +2063,7 @@ class _InventoryPageState extends State<_InventoryPage> {
         attachments = _CpvAppState.rows(catalog['attachments']);
         attachmentChanges = _CpvAppState.rows(plan['attachmentChanges'] ?? []);
         enabled = plan['enabled'] == true;
+        unlockAllWeapons = plan['unlockAllWeapons'] == true;
         loaded = true;
       });
     } catch (_) {
@@ -2090,13 +2130,14 @@ class _InventoryPageState extends State<_InventoryPage> {
     _ => t('未知槽位', 'Unknown slot'),
   };
 
-  Future<Json?> pickCatalog(
+  Future<List<Json>?> pickCatalog(
     String title,
     List<Json> rows, {
     required bool weapon,
+    Set<int>? checked,
   }) async {
     var query = '';
-    return showDialog<Json>(
+    return showDialog<List<Json>>(
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, refresh) {
@@ -2108,7 +2149,10 @@ class _InventoryPageState extends State<_InventoryPage> {
                 ? [
                     weaponKind(item),
                     if (id != 0) hexId(id) else item['entity'],
-                    if (!hasInventoryId(item)) t('仅查看', 'Browse only'),
+                    if (item['kind'] == 'support')
+                      t('仅查看，需通过战略配备使用', 'Browse only. Use as a stratagem.')
+                    else if (!hasInventoryId(item))
+                      t('仅查看，缺少库存 ID', 'Browse only. No inventory ID.'),
                   ].join(' · ')
                 : [
                     hexId(id),
@@ -2157,10 +2201,27 @@ class _InventoryPageState extends State<_InventoryPage> {
                             itemCount: filtered.length,
                             itemBuilder: (context, index) {
                               final row = filtered[index];
+                              if (checked != null) {
+                                final id = row.item['id'] as int;
+                                return CheckboxListTile(
+                                  title: Text(row.name),
+                                  subtitle: Text(row.detail),
+                                  value: checked.contains(id),
+                                  onChanged: !hasInventoryId(row.item)
+                                      ? null
+                                      : (value) => refresh(() {
+                                          if (value == true) {
+                                            checked.add(id);
+                                          } else {
+                                            checked.remove(id);
+                                          }
+                                        }),
+                                );
+                              }
                               return ListTile(
                                 title: Text(row.name),
                                 subtitle: Text(row.detail),
-                                onTap: () => Navigator.pop(context, row.item),
+                                onTap: () => Navigator.pop(context, [row.item]),
                               );
                             },
                           ),
@@ -2173,6 +2234,15 @@ class _InventoryPageState extends State<_InventoryPage> {
                 onPressed: () => Navigator.pop(context),
                 child: Text(t('取消', 'Cancel')),
               ),
+              if (checked != null)
+                FilledButton(
+                  onPressed: () => Navigator.pop(context, [
+                    for (final id in checked) <String, dynamic>{'id': id},
+                  ]),
+                  child: Text(
+                    t('确认选择（${checked.length}）', 'Apply (${checked.length})'),
+                  ),
+                ),
             ],
           );
         },
@@ -2180,26 +2250,23 @@ class _InventoryPageState extends State<_InventoryPage> {
     );
   }
 
-  Future<void> chooseWeapon(TextEditingController destination) async {
-    final weapon = await pickCatalog(
-      t('选择武器或投掷物', 'Choose weapon or throwable'),
-      weapons,
-      weapon: true,
-    );
-    if (!mounted || weapon == null) return;
-    if (!hasInventoryId(weapon)) {
-      setState(
-        () => message = t(
-          '此条目没有可用于库存预览的物品 ID。',
-          'This entry has no usable inventory item ID.',
-        ),
-      );
-      return;
-    }
+  Future<Json?> pickOne(
+    String title,
+    List<Json> rows, {
+    required bool weapon,
+  }) async => (await pickCatalog(title, rows, weapon: weapon))?.single;
+
+  Future<void> chooseWeapon() async {
     try {
-      final ids = {...parseIds(destination.text), weapon['id'] as int};
+      final selection = await pickCatalog(
+        t('选择武器或投掷物', 'Choose weapons or throwables'),
+        weapons,
+        weapon: true,
+        checked: parseIds(add.text).toSet(),
+      );
+      if (!mounted || selection == null) return;
       setState(() {
-        destination.text = ids.join(', ');
+        add.text = selection.map((row) => row['id']).join(', ');
         message = null;
       });
     } on FormatException catch (error) {
@@ -2208,7 +2275,7 @@ class _InventoryPageState extends State<_InventoryPage> {
   }
 
   Future<void> browseAttachments() async {
-    final attachment = await pickCatalog(
+    final attachment = await pickOne(
       t('配件目录', 'Attachment catalog'),
       attachments,
       weapon: false,
@@ -2225,13 +2292,13 @@ class _InventoryPageState extends State<_InventoryPage> {
   }
 
   Future<void> addAttachmentChange() async {
-    final weapon = await pickCatalog(
+    final weapon = await pickOne(
       t('选择要改配件的武器', 'Choose weapon to customize'),
       weapons.where(hasInventoryId).toList(),
       weapon: true,
     );
     if (weapon == null || !mounted) return;
-    final from = await pickCatalog(
+    final from = await pickOne(
       t('选择原有配件', 'Choose existing attachment'),
       attachments.where((item) => (item['slots'] as List).isNotEmpty).toList(),
       weapon: false,
@@ -2245,7 +2312,7 @@ class _InventoryPageState extends State<_InventoryPage> {
               (item['slots'] as List).any(slots.contains),
         )
         .toList();
-    final to = await pickCatalog(
+    final to = await pickOne(
       t('选择同槽位的替换配件', 'Choose replacement in the same slot'),
       candidates,
       weapon: false,
@@ -2275,7 +2342,7 @@ class _InventoryPageState extends State<_InventoryPage> {
     try {
       return parseIds(
         text,
-      ).map((id) => catalogLabel(weapons, id, weaponName)).join('、');
+      ).map((id) => catalogLabel(weapons, id, weaponName)).join(t('、', ', '));
     } on FormatException {
       return '';
     }
@@ -2294,6 +2361,79 @@ class _InventoryPageState extends State<_InventoryPage> {
     return ids.toList();
   }
 
+  String inventoryStatus() {
+    if (widget.proxyState['ready'] != true) {
+      return t(
+        '代理尚未就绪，请先在连接页启动代理。',
+        'Start the proxy on the Connection page first.',
+      );
+    }
+    final report = (widget.proxyState['health'] as Map?)?['inventory'] as Map?;
+    final added = report?['added'] ?? 0;
+    return switch (report?['status']) {
+      'applied' => t(
+        '最近一次库存响应已改写，新增 $added 项。',
+        'Latest inventory response: $added added.',
+      ),
+      'unchanged' => t(
+        '游戏已读取库存，这次响应没有变化。',
+        'The game fetched inventory. This response was unchanged.',
+      ),
+      'unsupported_response' => t(
+        '游戏返回的库存格式不兼容，响应保持原样。',
+        'The inventory response format was unsupported.',
+      ),
+      'http_error' => t(
+        '最近一次库存请求返回 HTTP ${report?['http_status']}。',
+        'Latest inventory request returned HTTP ${report?['http_status']}.',
+      ),
+      'missing_plan' || 'invalid_plan' || 'disabled' => t(
+        '上次读取时没有可用的已启用方案。',
+        'No enabled, valid plan was available on the last request.',
+      ),
+      _ => t(
+        '本次连接还未收到库存响应。保存方案后，请完全退出游戏，再通过 Steam 启动。',
+        'No inventory response yet. Save the plan, exit the game completely, then start it via Steam.',
+      ),
+    };
+  }
+
+  String itemCatalogStatus() {
+    final report =
+        (widget.proxyState['health'] as Map?)?['item_catalog'] as Map?;
+    final added = report?['added'] ?? 0;
+    final missing = report?['missing_templates'] ?? 0;
+    return switch (report?['status']) {
+      'applied' =>
+        missing == 0
+            ? t('物品目录已补入 $added 项。', 'Added $added items to the item catalog.')
+            : t(
+                '物品目录已补入 $added 项，另有 $missing 项缺少模板。',
+                'Added $added items to the item catalog. No template for $missing items.',
+              ),
+      'missing_template' => t(
+        '物品目录中找不到 $missing 项所需的同类模板。',
+        'No matching item catalog template for $missing items.',
+      ),
+      'unsupported_response' => t(
+        '游戏返回的物品目录格式不兼容。',
+        'The item catalog response format was unsupported.',
+      ),
+      'http_error' => t(
+        '物品目录请求返回 HTTP ${report?['http_status']}。',
+        'Item catalog request returned HTTP ${report?['http_status']}.',
+      ),
+      'waiting' || null => t(
+        '等待游戏读取物品目录。',
+        'Waiting for the game to fetch the item catalog.',
+      ),
+      _ => t(
+        '最近一次物品目录响应保持原样。',
+        'The latest item catalog response was unchanged.',
+      ),
+    };
+  }
+
   Future<void> save({bool disable = false}) async {
     setState(() {
       busy = true;
@@ -2304,11 +2444,11 @@ class _InventoryPageState extends State<_InventoryPage> {
           ? Json.from(await widget.core.call('inventory_preview'))
           : <String, dynamic>{
               'enabled': enabled,
+              'unlockAllWeapons': unlockAllWeapons,
               'items': [
                 for (final id in parseIds(add.text))
                   {'mixId': id, 'amount': 1, 'isDiscovered': false},
               ],
-              'remove': parseIds(remove.text),
               'customization': customization.text.trim().isEmpty
                   ? []
                   : jsonDecode(customization.text),
@@ -2335,7 +2475,6 @@ class _InventoryPageState extends State<_InventoryPage> {
   @override
   void dispose() {
     add.dispose();
-    remove.dispose();
     customization.dispose();
     super.dispose();
   }
@@ -2371,9 +2510,32 @@ class _InventoryPageState extends State<_InventoryPage> {
             ),
             Text(
               t(
-                '仅改变本机看到的军械库。物品可见性和装备结果取决于游戏，建议一次验证一个 ID。',
-                'Changes only the local armory view. Visibility and equipping depend on the game. Try one ID at a time.',
+                '预览只影响本机军械库，物品可见性和装备结果取决于游戏。',
+                'Preview changes the local armory view. Visibility and equipping depend on the game.',
               ),
+            ),
+            const SizedBox(height: 8),
+            Text(inventoryStatus()),
+            if (enabled && widget.proxyState['ready'] == true)
+              Text(itemCatalogStatus()),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(
+                t('解锁所有武器（本地预览）', 'Unlock all weapons (local preview)'),
+              ),
+              subtitle: Text(
+                t(
+                  '批量预览主武器、副武器和投掷物。未发布和未命名条目属于实验性预览。支援武器需通过战略配备使用。',
+                  'Preview primary weapons, secondary weapons and throwables. Unreleased and unnamed entries are experimental. Support weapons are used as stratagems.',
+                ),
+              ),
+              value: unlockAllWeapons,
+              onChanged: busy || !loaded
+                  ? null
+                  : (value) => setState(() {
+                      unlockAllWeapons = value;
+                      if (value) enabled = true;
+                    }),
             ),
             const SizedBox(height: 16),
             TextField(
@@ -2387,7 +2549,7 @@ class _InventoryPageState extends State<_InventoryPage> {
                   'Comma or space separated. 0x hex accepted.',
                 ),
                 suffixIcon: TextButton(
-                  onPressed: loaded && !busy ? () => chooseWeapon(add) : null,
+                  onPressed: loaded && !busy ? chooseWeapon : null,
                   child: Text(t('选武器', 'Pick weapon')),
                 ),
               ),
@@ -2397,20 +2559,6 @@ class _InventoryPageState extends State<_InventoryPage> {
                 padding: const EdgeInsets.only(top: 6),
                 child: Text(selectedWeapons(add.text)),
               ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: remove,
-              enabled: loaded && !busy,
-              decoration: InputDecoration(
-                labelText: t('隐藏的物品 ID', 'Hide item IDs'),
-                suffixIcon: TextButton(
-                  onPressed: loaded && !busy
-                      ? () => chooseWeapon(remove)
-                      : null,
-                  child: Text(t('选武器', 'Pick weapon')),
-                ),
-              ),
-            ),
             const SizedBox(height: 16),
             Wrap(
               spacing: 8,
@@ -2493,8 +2641,14 @@ class _InventoryPageState extends State<_InventoryPage> {
 }
 
 class PlanetPicker extends StatefulWidget {
-  const PlanetPicker({super.key, required this.planets, required this.en});
+  const PlanetPicker({
+    super.key,
+    required this.planets,
+    required this.en,
+    this.live,
+  });
   final List<Json> planets;
+  final ValueListenable<List<Json>>? live;
   final bool en;
   @override
   State<PlanetPicker> createState() => _PlanetPickerState();
@@ -2503,8 +2657,15 @@ class PlanetPicker extends StatefulWidget {
 class _PlanetPickerState extends State<PlanetPicker> {
   String query = '';
   @override
-  Widget build(BuildContext context) {
-    final rows = widget.planets.where((p) => matches(p, query)).toList();
+  Widget build(BuildContext context) => widget.live == null
+      ? picker(widget.planets)
+      : ValueListenableBuilder(
+          valueListenable: widget.live!,
+          builder: (_, planets, _) => picker(planets),
+        );
+
+  Widget picker(List<Json> planets) {
+    final rows = planets.where((p) => matches(p, query)).toList();
     return Dialog(
       child: SizedBox(
         width: 580,
@@ -2837,6 +2998,22 @@ class _PlanetEditorState extends State<PlanetEditor> {
             ),
           ),
           const Divider(height: 1),
+          if (widget.effects
+                  .where(
+                    (e) => e['effectType'] == 32 && selected.contains(e['id']),
+                  )
+                  .length >
+              1)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+              child: Text(
+                t(
+                  '游戏内的临时配发战备有数量限制，超出时可能无法正常使用。',
+                  'The game limits temporary stratagems. Extra selections may not work in-game.',
+                ),
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            ),
           if (saveError != null)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
@@ -2895,6 +3072,17 @@ class _PlanetEditorState extends State<PlanetEditor> {
   Widget operations() => ListView(
     children: [
       SwitchListTile(
+        title: Text(t('强制开放星球', 'Force planet open')),
+        subtitle: Text(
+          t(
+            '为当前战况中的星球生成作战。无法判断敌人时使用终结族，城市分区不可用时改用常规解放。',
+            'Creates operations for a planet in the current status. Uses Terminids when no enemy is known and standard liberation when city regions are unavailable.',
+          ),
+        ),
+        value: draft['force_open'] == true,
+        onChanged: (v) => setState(() => draft['force_open'] = v),
+      ),
+      SwitchListTile(
         title: Text(t('启用此方案', 'Enable this plan')),
         value: draft['enabled'] == true,
         onChanged: (v) => setState(() => draft['enabled'] = v),
@@ -2915,8 +3103,10 @@ class _PlanetEditorState extends State<PlanetEditor> {
             'The game must refresh war status after changes.',
           ),
         ),
-        value: draft['campaign'] == true,
-        onChanged: (v) => setState(() => draft['campaign'] = v),
+        value: draft['campaign'] == true || draft['force_open'] == true,
+        onChanged: draft['force_open'] == true
+            ? null
+            : (v) => setState(() => draft['campaign'] = v),
       ),
       select('campaign_type', t('战役类型', 'Campaign type'), [
         t('常规解放', 'Standard liberation'),
@@ -2925,6 +3115,25 @@ class _PlanetEditorState extends State<PlanetEditor> {
         t('超级地球保卫战形态', 'Super Earth defense form'),
         t('防守（实验性）', 'Defense (experimental)'),
       ]),
+      if (draft['campaign'] == true || draft['force_open'] == true)
+        Padding(
+          padding: const EdgeInsets.only(top: 16),
+          child: TextFormField(
+            initialValue: '${draft['campaign_count'] ?? 20}',
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+              labelText: t('作战数量', 'Operation count'),
+              helperText: t(
+                '城市与特殊星球战役需要足够的作战槽；默认 20。',
+                'City and special-planet campaigns need enough operation slots; default 20.',
+              ),
+            ),
+            onChanged: (v) {
+              final n = int.tryParse(v);
+              if (n != null) draft['campaign_count'] = n;
+            },
+          ),
+        ),
       const SizedBox(height: 16),
       select('campaign_race', t('作战敌人', 'Enemy faction'), [
         t('保留原样', 'Unchanged'),

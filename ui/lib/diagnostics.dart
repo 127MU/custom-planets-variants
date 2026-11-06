@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'version.dart';
+
 /// Bounded local diagnostic events. No HTTP traffic or private CA files.
 class Diagnostics {
   static Directory? directory;
@@ -76,7 +78,7 @@ class Diagnostics {
       } catch (_) {}
     }
     record('ui_startup', {
-      'version': '2.0.1',
+      'version': readReleaseVersion(),
       'operating_system': Platform.operatingSystemVersion,
       'architecture': Platform.version.split(' ').last,
     }, force: true);
@@ -142,7 +144,7 @@ class Diagnostics {
       const JsonEncoder.withIndent('  ').convert({
         'schema': 1,
         'product': '自定义星球和变种 / Custom Planets & Variants',
-        'version': '2.0.1',
+        'version': readReleaseVersion(),
         'startup_error': safe(error),
         'operating_system': Platform.operatingSystemVersion,
         'events': events,

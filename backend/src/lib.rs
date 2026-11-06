@@ -62,6 +62,7 @@ pub fn validate_targets(input: &Value) -> Result<Value> {
         for (key, default) in [
             ("enabled", true),
             ("campaign", false),
+            ("force_open", false),
             ("open_regions", false),
             ("initialize_regions", false),
         ] {
@@ -80,6 +81,7 @@ pub fn validate_targets(input: &Value) -> Result<Value> {
             ("defense_level", 20, 1, 1000),
             ("defense_hours", 48, 1, 168),
             ("defense_count", 38, 1, 1000),
+            ("campaign_count", 20, 1, 1000),
         ] {
             let value = row.get(key).cloned().unwrap_or(json!(default));
             integer(&value, low, high)?;
@@ -87,12 +89,13 @@ pub fn validate_targets(input: &Value) -> Result<Value> {
         }
         ensure!(
             !t["initialize_regions"].as_bool().unwrap()
-                || (t["campaign"] == true && t["campaign_race"].as_i64().unwrap() >= 2),
+                || ((t["campaign"] == true || t["force_open"] == true)
+                    && t["campaign_race"].as_i64().unwrap() >= 2),
             "初始化分区需开启战役并选择敌人 / Select a campaign and enemy before initializing regions"
         );
         if t["campaign_type"] == 4 {
             ensure!(
-                t["campaign"] == true
+                (t["campaign"] == true || t["force_open"] == true)
                     && t["owner"] == 1
                     && t["campaign_race"].as_i64().unwrap() >= 2,
                 "防守需开启战役、超级地球归属与敌人 / Invalid defense campaign"
@@ -240,18 +243,33 @@ pub fn catalog(profile: &Path) -> Result<Value> {
             }
         }
     }
-    if let Ok(live) = read_json(&profile.join("war-proxy/planets.json")) {
-        if let Some(rows) = live["planets"].as_array() {
-            for row in rows {
-                let Some(id) = row["index"].as_i64().filter(|n| (0..=10000).contains(n)) else {
-                    continue;
-                };
-                let planets = meta["planets"].as_array_mut().unwrap();
-                if let Some(p) = planets.iter_mut().find(|p| p["id"] == id) {
-                    p["owner"] = row["owner"].clone();
-                    p["players"] = row["players"].clone();
-                } else {
-                    planets.push(json!({"id":id,"name":format!("星球 #{id}"),"englishName":format!("Planet #{id}"),"owner":row["owner"],"players":row["players"]}));
+    for path in ["planet-catalog.json", "war-proxy/planets.json"] {
+        let Ok(live) = read_json(&profile.join(path)) else {
+            continue;
+        };
+        let Some(rows) = live["planets"].as_array() else {
+            continue;
+        };
+        for row in rows {
+            let Some(id) = row["index"].as_i64().filter(|n| (0..=10000).contains(n)) else {
+                continue;
+            };
+            let name = row["nameHash"]
+                .as_i64()
+                .filter(|&n| n != 0)
+                .and_then(|hash| meta["strings"][(hash as u32).to_string()].as_str())
+                .map(str::to_owned);
+            let planets = meta["planets"].as_array_mut().unwrap();
+            let position = match planets.iter().position(|p| p["id"] == id) {
+                Some(position) => position,
+                None => {
+                    planets.push(json!({"id":id,"name":name.unwrap_or_else(|| format!("星球 #{id}")),"englishName":format!("Planet #{id}")}));
+                    planets.len() - 1
+                }
+            };
+            for key in ["owner", "players"] {
+                if let Some(value) = row.get(key) {
+                    planets[position][key] = value.clone();
                 }
             }
         }
@@ -259,6 +277,28 @@ pub fn catalog(profile: &Path) -> Result<Value> {
     // Large game string dictionary stays inside the core; UI only receives display records.
     Ok(
         json!({"effects":meta["effects"],"planets":meta["planets"],"revision":meta["catalog_revision"]}),
+    )
+}
+
+pub fn save_planet_catalog(profile: &Path, document: &Value) -> Result<()> {
+    let war_id = integer(&document["warId"], 1, i64::from(u32::MAX))?;
+    let rows = document["planets"]
+        .as_array()
+        .filter(|rows| !rows.is_empty() && rows.len() <= 10001)
+        .ok_or_else(|| anyhow::anyhow!("无效的星球目录 / Invalid planet catalog"))?;
+    let mut seen = BTreeSet::new();
+    let mut planets = Vec::with_capacity(rows.len());
+    for row in rows {
+        let index = integer(&row["index"], 0, 10000)?;
+        ensure!(seen.insert(index), "星球编号重复 / Duplicate planet ID");
+        let hash = row["nameHash"]
+            .as_i64()
+            .filter(|n| (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(n));
+        planets.push(json!({"index": index, "nameHash": hash}));
+    }
+    write_json(
+        &profile.join("planet-catalog.json"),
+        &json!({"warId": war_id, "planets": planets}),
     )
 }
 
@@ -280,12 +320,19 @@ mod tests {
         let t = validate_targets(&json!([{"planet":1,"effects":[1346,1346,1431]}])).unwrap();
         assert_eq!(t[0]["effects"], json!([1346, 1431]));
         assert_eq!(t[0]["defense_hours"], 48);
+        assert_eq!(t[0]["campaign_count"], 20);
+        let old =
+            validate_targets(&json!([{"planet":1,"effects":[1129,1143],"max_temp_stratagems":1}]))
+                .unwrap();
+        assert_eq!(old[0]["effects"], json!([1129, 1143]));
+        assert!(old[0].get("max_temp_stratagems").is_none());
         for bad in [
             json!([{"planet":1.5,"effects":[]}]),
             json!([{"planet":1,"effects":[true]}]),
             json!([{"planet":1,"effects":[],"enabled":1}]),
             json!([{"planet":1,"effects":[],"initialize_regions":true}]),
             json!([{"planet":1,"effects":[]},{"planet":1,"effects":[]}]),
+            json!([{"planet":1,"effects":[],"campaign_count":0}]),
         ] {
             assert!(validate_targets(&bad).is_err());
         }

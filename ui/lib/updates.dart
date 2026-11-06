@@ -1,10 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
 
-const productVersion = '2.0.1';
+import 'version.dart';
+
 const projectRepository = '127MU/custom-planets-variants';
 final projectUri = Uri.https('github.com', '/$projectRepository');
 const updateMirrors = ['https://gh-proxy.com/', 'https://ghfast.top/'];
+/// 版本来自发行包清单；开发环境下为空，请求头退回 `dev`。
+final String _clientVersion = readReleaseVersion();
 
 List<int> releaseVersion(String value) {
   if (!RegExp(r'^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$').hasMatch(value) ||
@@ -151,7 +154,7 @@ class UpdateClient {
           request.followRedirects = false;
           request.headers.set(
             HttpHeaders.userAgentHeader,
-            'CPV/$productVersion',
+            'CPV/${_clientVersion.isEmpty ? 'dev' : _clientVersion}',
           );
           final response = await request.close();
           if ([301, 302, 303, 307, 308].contains(response.statusCode)) {

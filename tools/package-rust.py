@@ -1,10 +1,12 @@
 """Package only the Rust/Flutter app and the verified HTTP proxy runtime."""
-import argparse, hashlib, io, json, lzma, shutil, zipfile
+import argparse, hashlib, io, json, lzma, re, shutil, zipfile
 from pathlib import Path
 from proxy_runtime_policy import include_proxy_file
 from font_assets import verify_icons
 
 ROOT=Path(__file__).resolve().parents[1]
+# 版本只维护在 Cargo.toml；发布目录名与清单必须与单文件载荷前缀一致。
+version=re.search(r'^version\s*=\s*"([^"]+)"',(ROOT/'backend/Cargo.toml').read_text('utf8'),re.M).group(1)
 p=argparse.ArgumentParser()
 p.add_argument('--output',type=Path,required=True)
 p.add_argument('--proxy-runtime',type=Path,required=True)
@@ -15,7 +17,7 @@ a=p.parse_args()
 verify_icons(a.flutter_build)
 if not (a.flutter_build/'url_launcher_windows_plugin.dll').is_file():
     p.error('Windows browser launcher plugin is missing from the Flutter build')
-out=a.output.resolve();release=out/'CPV_2.0.1'
+out=a.output.resolve();release=out/('CPV_'+version)
 if release.exists():p.error('Use a fresh package output directory')
 release.mkdir(parents=True)
 for file in a.flutter_build.rglob('*'):
@@ -54,7 +56,7 @@ shutil.copy2(ROOT/'licenses/Morrow-LICENSE',release/'LICENSE')
 shutil.copy2(ROOT/'README.md',release/'README.md')
 shutil.copy2(ROOT/'README.en.md',release/'README.en.md')
 files={f.relative_to(release).as_posix():hashlib.sha256(f.read_bytes()).hexdigest() for f in release.rglob('*') if f.is_file()}
-(release/'manifest.json').write_text(json.dumps({'product':'CPV','version':'2.0.1','files':files},ensure_ascii=False,indent=2),'utf8')
+(release/'manifest.json').write_text(json.dumps({'product':'CPV','version':version,'files':files},ensure_ascii=False,indent=2),'utf8')
 if a.solid_payload:
     stored = io.BytesIO()
     entries = sorted((f for f in release.rglob('*') if f.is_file()),
@@ -75,6 +77,7 @@ with zipfile.ZipFile(source,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
         for f in (ROOT/folder).rglob('*'):
             if folder=='licenses' and f.name.startswith('Qt-'):continue
             if folder=='assets' and f.name in {'i18n-en.json','app.manifest','icon-prompt.txt'}:continue
+            if folder=='ui/test' and f.is_relative_to(ROOT/'ui/test/failures'):continue
             if f.is_file() and not any(part in {'ephemeral','__pycache__'} for part in f.parts):z.write(f,'CPV_Source/'+f.relative_to(ROOT).as_posix())
     for name in ['.gitignore','LICENSE','README.md','README.en.md','backend/Cargo.toml','backend/Cargo.lock','backend/build.rs','ui/pubspec.yaml','ui/pubspec.lock','ui/analysis_options.yaml','ui/.gitignore','ui/.metadata','ui/README.md','tools/build-rust.ps1','tools/package-rust.py','tools/proxy_runtime_policy.py','tools/font_assets.py','tools/release-manifest.py','tests/test_catalog.py','tests/test_translations.py','tests/test_war_status_addon.py','tests/test_rust_core.py']:
         z.write(ROOT/name,'CPV_Source/'+name)

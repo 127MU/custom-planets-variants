@@ -14,6 +14,10 @@ HOST = "api.live.prod.thehelldiversgame.com"
 STATUS = re.compile(r"^/api/WarSeason/[0-9]+/Status$")
 WAR_INFO = re.compile(r"^/api/WarSeason/[0-9]+/WarInfo$")
 INVENTORY = "/api/Progression/inventory"
+ITEM_CATALOG = "/api/Progression/items"
+ARMORY_ENDPOINTS = {INVENTORY.lower(): "inventory", ITEM_CATALOG.lower(): "item_catalog"}
+WEAPON_TEMPLATES = {0x7DE53646: 0xE673DCC8, 0x7349AF9A: 0x7C816371, 0xC9F609BA: 0xA7977F98}
+DEFAULT_WEAPON_TEMPLATES = {"primary": 0xAA035309, "secondary": 0xA7977F98, "throwable": 0xBE376EA8}
 MAX_BODY = 8 * 1024 * 1024
 # Verified type40 tag/type71 presence pairs, war 801. Never infer by ID adjacency.
 EFFECT_PAIRS = ((1202,1203),(1243,1245),(1244,1386),(1248,1249),(1303,1310),
@@ -24,29 +28,77 @@ EFFECT_PAIRS = ((1202,1203),(1243,1245),(1244,1386),(1248,1249),(1303,1310),
 NATIVE_ENEMY_EFFECTS = {1361: 3}
 
 
-def rewrite_inventory(document, plan):
+class InventorySchemaError(ValueError):
+    pass
+
+
+def weapon_series(model):
+    match = re.match(r"^([A-Z0-9/]+)-(\d+)", model.upper())
+    return match.groups() if match else ("", "")
+
+
+def rewrite_weapon_catalog(document, plan, weapons):
+    """Use only original live rows as templates for selected armory items."""
+    manual = plan.get("items")
+    if not isinstance(manual, list) or len(manual) > 128:
+        return document, 0
+    selected = set(weapons) if plan.get("unlockAllWeapons") is True else {
+        row["mixId"] for row in manual if isinstance(row, dict)
+        and type(row.get("mixId")) is int and row["mixId"] in weapons}
+    if not selected:
+        return document, 0
+    if not isinstance(document, list) or not all(isinstance(row, dict) for row in document):
+        raise InventorySchemaError()
+    existing = {row[key] for row in document for key in ("itemId", "mixId") if type(row.get(key)) is int}
+    templates = {}
+    for row in document:
+        item_id = row.get("itemId")
+        if type(item_id) is int and item_id in weapons and row.get("mixId") == item_id:
+            kind, model = weapons[item_id]
+            templates.setdefault(kind, []).append((item_id, weapon_series(model), row))
+
+    added = []
+    missing = 0
+    for item_id in sorted(selected - existing):
+        kind, model = weapons[item_id]
+        candidates = templates.get(kind)
+        if not candidates:
+            missing += 1
+            continue
+        series = weapon_series(model)
+        preferred = WEAPON_TEMPLATES.get(item_id)
+        _, _, template = max(candidates, key=lambda candidate: (
+            candidate[0] == preferred,
+            bool(series[0]) and candidate[1] == series,
+            bool(series[0]) and candidate[1][0] == series[0],
+            candidate[0] == DEFAULT_WEAPON_TEMPLATES[kind],
+            -candidate[0],
+        ))
+        added.append({**template, "itemId": item_id, "mixId": item_id})
+    return ([*document, *added] if added else document), missing
+
+
+def rewrite_inventory(document, plan, weapon_ids=()):
     """Apply a local preview without changing requests or upstream state."""
     def uint(value):
         return type(value) is int and 0 <= value <= 0xFFFFFFFF
 
-    if not isinstance(document, dict) or not isinstance(plan, dict) or plan.get("enabled") is not True:
+    if not isinstance(plan, dict) or plan.get("enabled") is not True:
+        return document
+    if not isinstance(document, dict):
+        raise InventorySchemaError()
+    unlock_all = plan.get("unlockAllWeapons", False)
+    if type(unlock_all) is not bool:
         return document
     items, customized = document.get("items"), document.get("customization")
-    added, removed, overrides = (plan.get(key) for key in ("items", "remove", "customization"))
-    if not all(isinstance(rows, list) and len(rows) <= 128 for rows in (added, removed, overrides)):
+    added, overrides = (plan.get(key) for key in ("items", "customization"))
+    if not all(isinstance(rows, list) and len(rows) <= 128 for rows in (added, overrides)):
         return document
-    if not isinstance(items, list) or not isinstance(customized, list):
-        return document
-    if not all(isinstance(row, dict) and uint(row.get("mixId")) for row in items):
-        return document
-    if not all(isinstance(row, dict) and uint(row.get("mixId32")) and uint(row.get("index"))
-               for row in customized):
-        return document
+    if not isinstance(items, list) or not all(isinstance(row, dict) and uint(row.get("mixId")) for row in items):
+        raise InventorySchemaError()
     if not all(isinstance(row, dict) and uint(row.get("mixId")) and row["mixId"]
                and type(row.get("amount")) is int and row["amount"] == 1
                and type(row.get("isDiscovered")) is bool for row in added):
-        return document
-    if not all(uint(value) and value for value in removed):
         return document
     fields = ("mixId32", "index", "activeIndex", "slots", "modes")
     for row in overrides:
@@ -65,14 +117,24 @@ def rewrite_inventory(document, plan):
                 for key in ("weapon", "from", "to")) or row["from"] == row["to"]:
             return document
         swaps.setdefault(row["weapon"], {})[row["from"]] = row["to"]
-    hidden = set(removed)
-    result_items = [row for row in items if row["mixId"] not in hidden]
+    result_items = list(items)
     owned = {row["mixId"] for row in result_items}
     for row in added:
         mix_id = row["mixId"]
-        if mix_id not in owned and mix_id not in hidden:
+        if mix_id not in owned:
             result_items.append({key: row[key] for key in ("mixId", "amount", "isDiscovered")})
             owned.add(mix_id)
+    if unlock_all:
+        for mix_id in weapon_ids:
+            if uint(mix_id) and mix_id and mix_id not in owned:
+                result_items.append({"mixId": mix_id, "amount": 1, "isDiscovered": False})
+                owned.add(mix_id)
+    if not overrides and not swaps:
+        return {**document, "items": result_items} if result_items != items else document
+    if not isinstance(customized, list) or not all(
+            isinstance(row, dict) and uint(row.get("mixId32")) and uint(row.get("index"))
+            for row in customized):
+        raise InventorySchemaError()
     replacements = {(row["mixId32"], row["index"]): {key: row[key] for key in fields}
                     for row in overrides}
     result_customized = []
@@ -251,6 +313,10 @@ def normalize_targets(plan):
         campaign = raw.get("campaign", False)
         if type(campaign) is not bool:
             raise ValueError("战役开关无效")
+        force_open = raw.get('force_open', False)
+        if type(force_open) is not bool:
+            raise ValueError('强制开放开关必须为布尔值')
+        campaign = campaign or force_open
         open_regions=raw.get('open_regions',False)
         if type(open_regions) is not bool:
             raise ValueError("分区开放开关必须为布尔值")
@@ -264,12 +330,15 @@ def normalize_targets(plan):
         for key, low, high in (('defense_source', -1, 10000), ('defense_level', 1, 1000), ('defense_hours', 1, 168), ('defense_count', 1, 1000)):
             if type(defense[key]) is not int or not low <= defense[key] <= high:
                 raise ValueError('防守战役参数无效：' + key)
+        campaign_count = raw.get('campaign_count', 20)
+        if type(campaign_count) is not int or not 1 <= campaign_count <= 1000:
+            raise ValueError('作战数量无效')
         if campaign_type == 4:
             if not campaign or owner != 1 or campaign_race not in (2, 3, 4):
                 raise ValueError('防守战役需要开启战役、超级地球归属和明确的敌人阵营')
             if defense['defense_source'] < 0 or defense['defense_source'] == planet:
                 raise ValueError('请选择另一颗敌方星球作为进攻来源')
-        result.append(dict(planet=planet, effects=list(dict.fromkeys(effects)), owner=owner, campaign=campaign, campaign_type=campaign_type, campaign_race=campaign_race,open_regions=open_regions,initialize_regions=initialize_regions, **defense))
+        result.append(dict(planet=planet, effects=list(dict.fromkeys(effects)), owner=owner, campaign=campaign, force_open=force_open, campaign_type=campaign_type, campaign_race=campaign_race,open_regions=open_regions,initialize_regions=initialize_regions,campaign_count=campaign_count, **defense))
     return result
 
 
@@ -331,7 +400,93 @@ def apply_defense(result, target, campaign, states):
     states[pid] = dict(signature=signature, id=eid, start=start, expire=expire)
 
 
-def rewrite_status(document, plan, allowed, campaign_ids=None, effect_types=None, region_reference=None, defense_states=None):
+def patch_planet_regions(regions, definitions, target, skipped):
+    """Prepare one planet's rows before changing any of them."""
+    planet = target['planet']
+    if not isinstance(regions, list):
+        raise RegionAvailabilityError('当前战况不包含有效分区列表')
+    positions = {}
+    for position, row in enumerate(regions):
+        if not isinstance(row, dict):
+            raise RegionAvailabilityError('原生分区结构不兼容')
+        if row.get('planetIndex') != planet:
+            continue
+        index = row.get('regionIndex')
+        if type(index) is not int or index < 0 or index in positions:
+            raise RegionAvailabilityError('原生分区编号无效或重复')
+        positions[index] = position
+
+    replacements = {}
+    additions = []
+    if target['initialize_regions']:
+        if definitions is None:
+            raise RegionAvailabilityError('缺少当前战争及布局对应的原生分区定义')
+        native = [row for row in definitions if isinstance(row, dict) and row.get('planetIndex') == planet]
+        if not native:
+            skipped.append((planet, '所选星球没有原生分区定义'))
+        seen = set()
+        for row in native:
+            index, maximum = row.get('regionIndex'), row.get('maxHealth')
+            if type(index) is not int or index < 0 or index in seen or type(maximum) is not int or maximum <= 1:
+                raise RegionAvailabilityError('原生分区编号或生命值上限不兼容')
+            seen.add(index)
+            if index not in positions:
+                additions.append(dict(planetIndex=planet, regionIndex=index, owner=target['campaign_race'],
+                                      health=maximum//2, players=0, regerPerSecond=0,
+                                      isAvailable=True, availabilityFactor=1))
+                continue
+            position = positions[index]
+            original = regions[position]
+            region = dict(original, owner=target['campaign_race'], isAvailable=True)
+            factor = region.get('availabilityFactor')
+            if type(factor) not in (int, float) or not math.isfinite(factor) or factor <= 0:
+                region['availabilityFactor'] = 1
+            health = region.get('health')
+            if type(health) not in (int, float) or not math.isfinite(health) or not 0 < health <= maximum:
+                region['health'] = maximum//2
+            if region != original:
+                replacements[position] = region
+
+    if target['open_regions']:
+        if not positions and not additions:
+            skipped.append((planet, '所选星球缺少原生分区状态'))
+        for position in positions.values():
+            original = regions[position]
+            region = replacements.get(position, original)
+            factor = region.get('availabilityFactor')
+            if type(region.get('isAvailable')) is not bool or type(factor) not in (int, float) or not math.isfinite(factor):
+                raise RegionAvailabilityError('原生分区可用性字段不兼容，已保持原样')
+            health = region.get('health')
+            if type(health) in (int, float) and health <= 0:
+                skipped.append((planet, '分区血量为 0，未开放'))
+                continue
+            if not region['isAvailable'] or factor <= 0:
+                replacements[position] = dict(region, isAvailable=True, availabilityFactor=factor if factor > 0 else 1)
+    for position, replacement in replacements.items():
+        regions[position] = replacement
+    regions.extend(additions)
+    return len(replacements) + len(additions)
+
+
+def enemy_for_plan(target, planet, campaigns, entries):
+    for race in (target['campaign_race'], target['owner']):
+        if race in (2, 3, 4):
+            return race
+    native = {c.get('race') for c in campaigns if c.get('planetIndex') == target['planet']
+              and c.get('race') in (2, 3, 4)}
+    if len(native) == 1:
+        return next(iter(native))
+    owner = planet.get('owner')
+    if owner in (2, 3, 4):
+        return owner
+    effects = {NATIVE_ENEMY_EFFECTS[e['galacticEffectId']] for e in entries
+               if e['index'] == target['planet'] and e['galacticEffectId'] in NATIVE_ENEMY_EFFECTS}
+    return next(iter(effects)) if len(effects) == 1 else None
+
+
+def rewrite_status(document, plan, allowed, campaign_ids=None, effect_types=None,
+                   region_reference=None, defense_states=None,
+                   region_skips=None, recovery=None):
     """Pure transformation; malformed/unknown schema must fail before mutation."""
     if not isinstance(document, dict):
         raise ValueError("战况响应不是对象，已保持原样")
@@ -349,10 +504,21 @@ def rewrite_status(document, plan, allowed, campaign_ids=None, effect_types=None
     known_planets = {p["index"] for p in planets if isinstance(p, dict) and type(p.get("index")) is int}
     additions = []
     targets = normalize_targets(plan)
-    target_owners = {t['planet']:t['owner'] for t in targets if t['owner']}
-    for target in targets:
-        if target['campaign_type'] == 4 and target['defense_source'] in target_owners and target_owners[target['defense_source']] != target['campaign_race']:
-            raise ValueError('进攻来源的另一份方案会改变其阵营，请先解决冲突')
+    if recovery is not None:
+        missing = [t['planet'] for t in targets if t['planet'] not in known_planets]
+        if missing:
+            recovery['missing_planets'] = missing
+        targets = [t for t in targets if t['planet'] in known_planets]
+        for target in targets:
+            unsupported = [eid for eid in target['effects'] if allowed is None or eid not in allowed]
+            if unsupported:
+                recovery.setdefault('unavailable_effects', {})[target['planet']] = unsupported
+                target['effects'] = [eid for eid in target['effects'] if eid not in unsupported]
+    if recovery is None:
+        target_owners = {t['planet']:t['owner'] for t in targets if t['owner']}
+        for target in targets:
+            if target['campaign_type'] == 4 and target['defense_source'] in target_owners and target_owners[target['defense_source']] != target['campaign_race']:
+                raise ValueError('进攻来源的另一份方案会改变其阵营，请先解决冲突')
     # Both members must be present in this session's authoritative catalog and
     # retain their verified types. Cached display data never grants permission.
     if effect_types and allowed is not None:
@@ -372,6 +538,7 @@ def rewrite_status(document, plan, allowed, campaign_ids=None, effect_types=None
         for effect in target["effects"]:
             if allowed is None or effect not in allowed:
                 raise ValueError("效果 #"+str(effect)+" 不在本次战争目录中，已保持原样")
+        for effect in target["effects"]:
             if (planet, effect) not in pairs:
                 additions.append({"index": planet, "galacticEffectId": effect})
                 pairs.add((planet, effect))
@@ -380,78 +547,80 @@ def rewrite_status(document, plan, allowed, campaign_ids=None, effect_types=None
     next_defense_states = copy.deepcopy(defense_states) if defense_states is not None else {}
     result["planetActiveEffects"] = entries + additions
     changes = len(additions)
-    initialize_targets=[t for t in targets if t['initialize_regions']]
-    if initialize_targets:
-        if not isinstance(region_reference,dict) or region_reference.get('warId')!=document.get('warId') or region_reference.get('layoutVersion')!=document.get('layoutVersion'):
-            raise RegionAvailabilityError('缺少当前战争及布局对应的原生分区定义')
-        definitions=region_reference.get('planetRegions')
-        regions=result.get('planetRegions')
-        if not isinstance(definitions,list) or not isinstance(regions,list):
-            raise RegionAvailabilityError('原生分区定义或状态列表不兼容')
-        for target in initialize_targets:
-            native=[r for r in definitions if isinstance(r,dict) and r.get('planetIndex')==target['planet']]
-            if not native:
-                raise RegionAvailabilityError('所选星球没有原生分区定义')
-            seen=set()
-            for definition in native:
-                index=definition.get('regionIndex');maximum=definition.get('maxHealth')
-                if type(index) is not int or index<0 or index in seen or type(maximum) is not int or maximum<=1:
-                    raise RegionAvailabilityError('原生分区编号或生命值上限不兼容')
-                seen.add(index)
-                existing=[r for r in regions if isinstance(r,dict) and r.get('planetIndex')==target['planet'] and r.get('regionIndex')==index]
-                if len(existing)>1:
-                    raise RegionAvailabilityError('当前战况包含重复的原生分区状态')
-                if existing:
-                    # Explicit local campaign initialization must also make
-                    # existing native regions playable for the selected enemy.
-                    # Merely preserving a locked/liberated/stale row leaves
-                    # the planet with a campaign but no eligible operations.
-                    region=existing[0]
-                    for field,value in (('owner',target['campaign_race']),('isAvailable',True)):
-                        if region.get(field)!=value:
-                            region[field]=value;changes+=1
-                    factor=region.get('availabilityFactor')
-                    if type(factor) not in (int,float) or not math.isfinite(factor) or factor<=0:
-                        region['availabilityFactor']=1;changes+=1
-                    health=region.get('health')
-                    if type(health) not in (int,float) or not math.isfinite(health) or health<=0 or health>maximum:
-                        region['health']=maximum//2;changes+=1
-                    continue
-                # Experimental local state, not server defaults or persisted war progress.
-                regions.append(dict(planetIndex=target['planet'],regionIndex=index,owner=target['campaign_race'],health=maximum//2,players=0,regerPerSecond=0,isAvailable=True,availabilityFactor=1))
-                changes+=1
-    region_targets={t['planet'] for t in targets if t['open_regions']}
-    if region_targets:
-        regions=result.get('planetRegions')
-        if not isinstance(regions,list):
-            raise RegionAvailabilityError('当前战况不包含原生分区，未创建虚构分区')
-        found=set()
-        for region in regions:
-            if not isinstance(region,dict):
-                raise RegionAvailabilityError('原生分区结构不兼容')
-            if region.get('planetIndex') not in region_targets:
-                continue
-            if type(region.get('regionIndex')) is not int or type(region.get('isAvailable')) is not bool or type(region.get('availabilityFactor')) not in (int,float) or not math.isfinite(region['availabilityFactor']):
-                raise RegionAvailabilityError('原生分区可用性字段不兼容，已保持原样')
-            found.add(region['planetIndex'])
-            if not region['isAvailable']:
-                region['isAvailable']=True;changes+=1
-            if region['availabilityFactor']<=0:
-                region['availabilityFactor']=1;changes+=1
-        if found!=region_targets:
-            raise RegionAvailabilityError('所选星球缺少原生分区，已保持原样')
+    definitions = None
+    if (isinstance(region_reference, dict)
+            and region_reference.get('warId') == document.get('warId')
+            and region_reference.get('layoutVersion') == document.get('layoutVersion')
+            and isinstance(region_reference.get('planetRegions'), list)):
+        definitions = region_reference['planetRegions']
+    if recovery is not None and definitions is not None and 'planetRegions' not in result:
+        result['planetRegions'] = []
+    world_info = {}
+    if definitions is not None and isinstance(region_reference.get('planetInfos'), list):
+        world_info = {row['index']: row for row in region_reference['planetInfos']
+                      if isinstance(row, dict) and type(row.get('index')) is int}
+    native_planets = {row.get('planetIndex') for row in (definitions or [])
+                      if isinstance(row, dict) and type(row.get('planetIndex')) is int}
+    for target in targets:
+        pid = target['planet']
+        if recovery is not None and target['campaign']:
+            planet = next(row for row in planets if row['index'] == pid)
+            race = enemy_for_plan(target, planet, campaigns, entries)
+            if target['force_open'] and target['campaign_type'] != 4:
+                target['campaign_race'] = target['owner'] = race or 2
+            elif not any(c['planetIndex'] == pid for c in campaigns):
+                target['campaign_race'] = race or 2
+            if target['campaign_type'] in (0, 3) and pid in native_planets:
+                target['campaign_race'] = race or 2
+                target['initialize_regions'] = True
+        if target['initialize_regions'] or target['open_regions']:
+            skipped = []
+            try:
+                changes += patch_planet_regions(result.get('planetRegions'), definitions, target, skipped)
+            except RegionAvailabilityError as error:
+                if recovery is None:
+                    raise
+                skipped = [(pid, str(error))]
+            if region_skips is not None:
+                region_skips.extend(skipped)
+            if recovery is not None and target['initialize_regions'] and pid in native_planets and not skipped:
+                recovery.setdefault('initialized', []).append(pid)
+        if recovery is not None and target['campaign'] and target['campaign_type'] == 3:
+            regions = result.get('planetRegions')
+            planet = next(row for row in planets if row['index'] == pid)
+            race = enemy_for_plan(target, planet, campaigns, entries)
+            usable = isinstance(regions, list) and any(
+                isinstance(row, dict) and row.get('planetIndex') == pid
+                and row.get('owner') == race and row.get('isAvailable') is True
+                and type(row.get('regionIndex')) is int
+                and type(row.get('health')) in (int, float) and 0 < row['health'] < math.inf
+                and type(row.get('availabilityFactor')) in (int, float)
+                and 0 < row['availabilityFactor'] < math.inf for row in regions)
+            if not usable:
+                target['campaign_type'] = 0
+                recovery.setdefault('campaign_fallbacks', {})[pid] = '分区不可用，改用常规解放'
     output_campaign_ids = campaign_ids
     campaign_ids = dict(campaign_ids) if campaign_ids is not None else {}
     used_ids = {c["id"] for c in campaigns} if any(t["campaign"] or t["owner"] for t in targets) else set()
+    original_owners = {p['index']: p.get('owner') for p in planets}
+    output_planets = {p['index']: p for p in result['planetStatus']}
     for target in targets:
-        planet = next(p for p in result["planetStatus"] if p.get("index") == target["planet"])
-        original_owner = planet.get("owner", 0)
+        planet = output_planets[target['planet']]
+        if target['owner'] and planet.get('owner') != target['owner']:
+            planet['owner'] = target['owner']
+            changes += 1
+        if recovery is not None and target['force_open'] and target['campaign_type'] != 4:
+            maximum = world_info.get(target['planet'], {}).get('maxHealth')
+            health = planet.get('health')
+            if type(maximum) is int and maximum > 1 and type(health) in (int, float) and health <= 0:
+                planet['health'] = maximum//2
+                changes += 1
+    for target in targets:
+        planet = output_planets[target['planet']]
+        original_owner = original_owners[target['planet']]
         native_races = {NATIVE_ENEMY_EFFECTS[e['galacticEffectId']] for e in entries if e['index'] == target['planet'] and e['galacticEffectId'] in NATIVE_ENEMY_EFFECTS}
         inferred_race = original_owner if original_owner in (2, 3, 4) else next(iter(native_races)) if len(native_races) == 1 else 1
         requested_race = target['campaign_race'] or (target['owner'] if target['owner'] in (2, 3, 4) else 0)
-        if target["owner"] and planet.get("owner") != target["owner"]:
-            planet["owner"] = target["owner"]
-            changes += 1
         if requested_race:
             for campaign in result.get("campaigns", []):
                 if campaign["planetIndex"] == target["planet"] and campaign.get("race") != requested_race:
@@ -467,22 +636,63 @@ def rewrite_status(document, plan, allowed, campaign_ids=None, effect_types=None
                     raise ValueError("无法分配实验性战役编号")
                 campaign_ids[target["planet"]] = candidate
                 used_ids.add(candidate)
-                current = {"id": candidate, "planetIndex": target["planet"], "type": target["campaign_type"], "count": 1, "race": requested_race or inferred_race}
+                current = {"id": candidate, "planetIndex": target["planet"], "type": target["campaign_type"], "count": target["campaign_count"], "race": requested_race or inferred_race}
                 result.setdefault("campaigns", []).append(current)
                 changes += 1
             elif current.get("type") != target["campaign_type"]:
                 current["type"] = target["campaign_type"]
                 changes += 1
-            if type(current.get('count')) is not int or current['count'] <= 0:
-                current['count'] = 1
+            if type(current.get('count')) is not int or current['count'] <= 0 or (
+                    recovery is not None and (target['force_open'] or target['initialize_regions'])
+                    and current['count'] < target['campaign_count']):
+                current['count'] = target['campaign_count']
                 changes += 1
             if requested_race and current.get("race") != requested_race:
                 current["race"] = requested_race
                 changes += 1
             if target['campaign_type'] == 4:
                 before = copy.deepcopy(result)
-                apply_defense(result, target, current, next_defense_states)
-                changes += int(result != before)
+                try:
+                    apply_defense(result, target, current, next_defense_states)
+                except ValueError as error:
+                    if recovery is None:
+                        raise
+                    # An incompatible defense cannot make unrelated planets fail.
+                    result.update(before)
+                    output_planets = {p['index']: p for p in result['planetStatus']}
+                    pid = target['planet']
+                    existing = [c for c in campaigns if c['planetIndex'] == pid]
+                    native_events = document.get('planetEvents')
+                    has_native_defense = any(c.get('type') == 4 for c in existing) or (
+                        isinstance(native_events, list) and any(
+                            isinstance(e, dict) and e.get('planetIndex') == pid and e.get('eventType') == 1
+                            for e in native_events))
+                    if has_native_defense:
+                        untouched = iter(copy.deepcopy(existing))
+                        restored = []
+                        for row in result['campaigns']:
+                            if row['planetIndex'] != pid:
+                                restored.append(row)
+                                continue
+                            original = next(untouched, None)
+                            if original is not None:
+                                restored.append(original)
+                        result['campaigns'] = restored
+                        if 'owner' in next(p for p in planets if p['index'] == pid):
+                            output_planets[pid]['owner'] = original_owner
+                        else:
+                            output_planets[pid].pop('owner', None)
+                        reason = '防守配置不可用，保留原生防守'
+                    else:
+                        for row in result['campaigns']:
+                            if row['id'] == current['id']:
+                                row.update(type=0, count=target['campaign_count'], race=target['campaign_race'])
+                        output_planets[pid]['owner'] = target['campaign_race']
+                        reason = '防守配置不可用，改用常规解放'
+                    recovery.setdefault('campaign_fallbacks', {})[pid] = f'{reason}（{error}）'
+                    changes += 1
+                else:
+                    changes += int(result != before)
     if defense_states is not None:
         defense_states.clear()
         defense_states.update(next_defense_states)
@@ -495,6 +705,9 @@ def rewrite_status(document, plan, allowed, campaign_ids=None, effect_types=None
 class WarStatusAddon:
     def __init__(self):
         self.plan = None
+        self.armory_weapons = {}
+        self.inventory = {"responses": 0, "status": "waiting", "http_status": 0, "added": 0}
+        self.item_catalog = {**self.inventory, "missing_templates": 0}
         self.allowed = None
         self.effect_types = {}
         self.rewrites = 0
@@ -510,6 +723,8 @@ class WarStatusAddon:
         self.war_id = None
         self.region_reference = None
         self.region_reference_error = None
+        self.region_reference_lock = asyncio.Lock()
+        self.region_reference_retry = {}
         self.shutting_down = False
         self.ready = False
         self.revocation_service = None
@@ -525,13 +740,15 @@ class WarStatusAddon:
         try:
             target = Path(self.health_path)
             temporary = target.with_suffix(".tmp")
-            temporary.write_text(json.dumps({"message": message, "ready": self.ready, "router_port": self.api_router.port if self.api_router else 0, "failures": self.failures, "connection": self.connection, "rewrites": self.rewrites, "statuses": self.statuses, "catalog_count": self.catalog_count, "war_id": self.war_id, "applied_plan_digest": self.applied_plan_digest, "updated": time.time()}, ensure_ascii=False), encoding="utf-8")
+            temporary.write_text(json.dumps({"message": message, "ready": self.ready, "router_port": self.api_router.port if self.api_router else 0, "failures": self.failures, "connection": self.connection, "inventory": self.inventory, "item_catalog": self.item_catalog, "rewrites": self.rewrites, "statuses": self.statuses, "catalog_count": self.catalog_count, "war_id": self.war_id, "applied_plan_digest": self.applied_plan_digest, "updated": time.time()}, ensure_ascii=False), encoding="utf-8")
             os.replace(temporary, target)
         except OSError:
             pass  # Diagnostics must not break forwarding.
 
     def load(self, loader):
         self.plan_path = Path(os.environ["CPV_WAR_PLAN"])
+        self.armory_weapons = {item_id: (kind, model) for item_id, kind, model in
+                               json.loads(os.environ.get("CPV_ARMORY_WEAPON_CATALOG", "[]"))}
         self.plan = json.loads(self.plan_path.read_text(encoding="utf-8"))
         self.plan_digest = hashlib.sha256(self.plan_path.read_bytes()).hexdigest()
         normalize_targets(self.plan)
@@ -579,8 +796,11 @@ class WarStatusAddon:
         request = flow.request
         if request.pretty_host.lower() == HOST:
             self.connection["requests"] += 1
-        if request.method=='GET' and request.pretty_host.lower()==HOST and (STATUS.fullmatch(request.path.split('?',1)[0]) or request.path.split('?',1)[0]=="/api/WarSeason/GalacticWarEffects"):
-            # Refresh Status and the live effect catalog; authentication is untouched.
+        path = request.path.split('?', 1)[0]
+        if request.method == 'GET' and request.pretty_host.lower() == HOST and (
+                STATUS.fullmatch(path) or path == "/api/WarSeason/GalacticWarEffects"
+                or path.lower().removesuffix('/') in ARMORY_ENDPOINTS):
+            # Request a full response for the public catalogs and locally previewed inventory.
             for name in ('if-none-match', 'if-modified-since'):
                 request.headers.pop(name, None)
             request.headers['cache-control']='no-cache'
@@ -695,7 +915,7 @@ class WarStatusAddon:
     def fetch_region_reference(self, war_id):
         # Public static endpoint only. No account headers, cookies or proxy loop.
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open("https://"+HOST+"/api/WarSeason/"+str(war_id)+"/WarInfo",timeout=8) as reply:
+        with opener.open("https://"+HOST+"/api/WarSeason/"+str(war_id)+"/WarInfo",timeout=3) as reply:
             raw=reply.read(MAX_BODY+1)
         if len(raw)>MAX_BODY:
             raise ValueError('原生分区定义响应过大')
@@ -710,42 +930,70 @@ class WarStatusAddon:
         if request.method=='GET' and request.pretty_host.lower()==HOST and response.status_code==200 and STATUS.fullmatch(path):
             try:
                 self.reload_plan()
-                if any(t['initialize_regions'] for t in normalize_targets(self.plan)):
+                if any(t['initialize_regions'] or (t['campaign'] and t['campaign_type'] in (0, 3))
+                       for t in normalize_targets(self.plan)):
                     raw=response.content
                     if raw is not None and len(raw)<=MAX_BODY:
                         document=json.loads(raw);war_id=int(path.split('/')[3])
                         if not isinstance(document,dict):
                             raise ValueError('战况不是对象')
-                        if not isinstance(self.region_reference,dict) or self.region_reference.get('warId')!=war_id or self.region_reference.get('layoutVersion')!=document.get('layoutVersion'):
-                            self.region_reference=await asyncio.to_thread(self.fetch_region_reference,war_id)
-                            self.region_reference_error=None
+                        layout = document.get('layoutVersion')
+                        if type(layout) is int:
+                            async with self.region_reference_lock:
+                                key = (war_id, layout)
+                                matches = (self.region_reference is not None
+                                           and self.region_reference.get('warId') == war_id
+                                           and self.region_reference.get('layoutVersion') == layout)
+                                if not matches and time.monotonic() >= self.region_reference_retry.get(key, 0):
+                                    self.region_reference_retry = {key: time.monotonic() + 15}
+                                    reference = await asyncio.to_thread(self.fetch_region_reference, war_id)
+                                    if reference.get('layoutVersion') != layout:
+                                        raise ValueError('原生分区与战况布局不一致')
+                                    self.region_reference = reference
+                                    self.region_reference_error = None
+                                    self.region_reference_retry.clear()
             except (ValueError,TypeError,KeyError,OSError) as error:
                 self.region_reference_error=type(error).__name__
         self.process_response(flow)
 
-    def preview_inventory(self, response):
+    def preview_armory(self, response, endpoint, report):
         if not self.plan_path:
-            return
+            return "missing_plan"
         try:
             with self.plan_path.with_name("inventory-preview.json").open("rb") as config:
                 raw_plan = config.read(65537)
             if len(raw_plan) > 65536:
-                return
+                return "invalid_plan"
             plan = json.loads(raw_plan)
-            if not isinstance(plan, dict) or plan.get("enabled") is not True:
-                return
+        except FileNotFoundError:
+            return "missing_plan"
+        except (OSError, ValueError):
+            return "invalid_plan"
+        if not isinstance(plan, dict) or type(plan.get("enabled")) is not bool:
+            return "invalid_plan"
+        if not plan["enabled"]:
+            return "disabled"
+        try:
             raw = response.content
             if raw is None or len(raw) > MAX_BODY:
-                return
+                return "unsupported_response"
             original = json.loads(raw)
-            changed = rewrite_inventory(original, plan)
-            if changed is not original:
-                response.content = json.dumps(changed, separators=(",", ":")).encode("utf-8")
-                response.headers.pop("etag", None)
-                response.headers["cache-control"] = "no-store"
-                self.health("已应用军械库本地预览")
-        except (OSError, ValueError, TypeError):
-            pass  # A missing/invalid plan or changed API schema leaves the response intact.
+            if endpoint == "item_catalog":
+                changed, report["missing_templates"] = rewrite_weapon_catalog(original, plan, self.armory_weapons)
+            else:
+                changed = rewrite_inventory(original, plan, self.armory_weapons)
+        except (ValueError, TypeError):
+            return "unsupported_response"
+        if changed is original:
+            return "missing_template" if report.get("missing_templates") else "unchanged"
+        added = (len(changed) - len(original) if endpoint == "item_catalog"
+                 else len(changed["items"]) - len(original["items"]))
+        response.content = json.dumps(changed, separators=(",", ":")).encode("utf-8")
+        for name in ("etag", "last-modified", "content-md5", "digest"):
+            response.headers.pop(name, None)
+        response.headers["cache-control"] = "no-store"
+        report["added"] = added
+        return "applied"
 
     def process_response(self, flow):
         request, response = flow.request, flow.response
@@ -754,11 +1002,19 @@ class WarStatusAddon:
             self.connection["last_status"] = int(response.status_code)
             if response.status_code >= 400:
                 self.health("游戏 API 返回 HTTP " + str(int(response.status_code)) + "；未修改此响应")
-        if request.method != "GET" or request.pretty_host.lower() != HOST or response.status_code != 200:
+        if request.method != "GET" or request.pretty_host.lower() != HOST:
             return
         path = request.path.split("?", 1)[0]
-        if path == INVENTORY:
-            self.preview_inventory(response)
+        endpoint = ARMORY_ENDPOINTS.get(path.lower().removesuffix('/'))
+        if endpoint:
+            report = self.item_catalog if endpoint == "item_catalog" else self.inventory
+            report.update(responses=report["responses"] + 1, http_status=response.status_code, added=0)
+            if endpoint == "item_catalog":
+                report["missing_templates"] = 0
+            report["status"] = self.preview_armory(response, endpoint, report) if response.status_code == 200 else "http_error"
+            self.health(self.last_message)
+            return
+        if response.status_code != 200:
             return
         if path != "/api/WarSeason/GalacticWarEffects" and not STATUS.fullmatch(path) and not WAR_INFO.fullmatch(path):
             return
@@ -777,6 +1033,11 @@ class WarStatusAddon:
                 regions=document.get('planetRegions',[])
                 if not isinstance(regions,list):
                     raise ValueError("WarInfo 分区定义格式不兼容")
+                if (document.get('warId') == int(path.split('/')[3])
+                        and type(document.get('layoutVersion')) is int):
+                    self.region_reference = document
+                    self.region_reference_error = None
+                    self.region_reference_retry.clear()
                 fields=('planetIndex','regionIndex','settingsHash','maxHealth','regionSize','flags','damageMultiplier')
                 self.snapshot('planet-region-definitions.json',{'war_id':int(path.split('/')[3]),'regions':[
                     {k:r[k] for k in fields if type(r.get(k)) in (int,float)} for r in regions if isinstance(r,dict)],'updated':time.time()})
@@ -806,21 +1067,15 @@ class WarStatusAddon:
             planets = document.get("planetStatus", []) if isinstance(document, dict) else []
             public = [{k: p[k] for k in ("index", "owner", "health", "players") if type(p.get(k)) in (int, float)} for p in planets if isinstance(p, dict) and type(p.get("index")) is int]
             self.snapshot("planets.json", {"planets": public, "war_id": war_id, "updated": time.time()})
-            if self.allowed is None and any(t["effects"] for t in normalize_targets(self.plan)):
-                self.health("尚未获取本次效果目录，战况保持原样；请重新登录游戏")
-                return
             region_error = None
-            try:
-                changed, count = rewrite_status(document, self.plan, self.allowed, self.campaign_ids, self.effect_types,self.region_reference,self.defense_states)
-            except RegionAvailabilityError as error:
-                # Unsupported experimental regions must not remove the working
-                # planet campaigns/effects from this same Status response.
-                region_error = str(error)
-                fallback = copy.deepcopy(self.plan)
-                for target in fallback.get('targets', []):
-                    target['open_regions'] = False
-                    target['initialize_regions'] = False
-                changed, count = rewrite_status(document, fallback, self.allowed, self.campaign_ids, self.effect_types,defense_states=self.defense_states)
+            region_skips = []
+            recovery = {}
+            changed, count = rewrite_status(
+                document, self.plan, self.allowed, self.campaign_ids, self.effect_types,
+                self.region_reference, self.defense_states, region_skips, recovery)
+            if region_skips:
+                skipped = dict(region_skips)
+                region_error = '；'.join('星球 #'+str(pid)+'：'+reason for pid, reason in sorted(skipped.items()))
             if count:
                 response.content = json.dumps(changed, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
                 for header in ("etag", "content-md5", "digest"):
@@ -854,9 +1109,23 @@ class WarStatusAddon:
                 'server_schema':{name: sorted({key for row in document.get(name,[]) if isinstance(row,dict) for key in row}) for name in ('campaigns','planetEvents','jointOperations') if isinstance(document.get(name,[]),list)},
                 'status_fields':sorted(document.keys()),
                 'region_schemas':{name:sorted({key for row in rows if isinstance(row,dict) for key in row}) for name,rows in document.items() if 'region' in name.lower() and isinstance(rows,list)},
-                'region_error':region_error, 'region_reference_error':self.region_reference_error, 'initialized_region_planets':[t['planet'] for t in normalize_targets(self.plan) if t['initialize_regions']] if not region_error else [], 'plan_digest':self.plan_digest, 'operation_generation_verified':False, 'updated': time.time()})
+                'region_error':region_error, 'region_reference_error':self.region_reference_error,
+                'initialized_region_planets':recovery.get('initialized', []),
+                'campaign_fallbacks':recovery.get('campaign_fallbacks', {}),
+                'missing_planets':recovery.get('missing_planets', []),
+                'unavailable_effects':recovery.get('unavailable_effects', {}),
+                'skipped_region_planets':sorted({pid for pid,_ in region_skips}), 'plan_digest':self.plan_digest, 'operation_generation_verified':False, 'updated': time.time()})
             self.applied_plan_digest = self.plan_digest
-            self.health(("分区实验未应用："+region_error+"；其余战役与效果已应用") if region_error else "方案已应用到本次战况响应；已生成作战和局内效果仍需游戏验证")
+            notes = []
+            if region_error:
+                notes.append("分区实验未应用："+region_error)
+            for pid, reason in recovery.get('campaign_fallbacks', {}).items():
+                notes.append(f'星球 #{pid}：{reason}')
+            if recovery.get('missing_planets'):
+                notes.append('本次战况缺少星球：' + ', '.join(f'#{pid}' for pid in recovery['missing_planets']))
+            if recovery.get('unavailable_effects'):
+                notes.append('已跳过当前目录不支持的效果')
+            self.health(("；".join(notes)+"；其余战役与效果已应用") if notes else "方案已应用到本次战况响应；已生成作战和局内效果仍需游戏验证")
         except (ValueError, KeyError, TypeError, UnicodeError, OSError) as error:
             self.health("校验未通过，响应保持原样："+str(error)[:140])
 

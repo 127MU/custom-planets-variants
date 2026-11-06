@@ -22,6 +22,97 @@ def flow(path, document, host=addon.HOST, method="GET"):
 
 
 class TestWarStatusAddon(unittest.TestCase):
+    def test_weapons_appear_in_both_armory_responses_for_manual_and_bulk_modes(self):
+        shear_id, scythe_id = 0x7DE53646, 0xE673DCC8
+        template = {"itemId": scythe_id, "mixId": scythe_id,
+                    "progressionCategory": 1, "requiredItems": [], "tags": [123]}
+        shear = dict(template, itemId=shear_id, mixId=shear_id)
+        with tempfile.TemporaryDirectory() as directory:
+            hook = addon.WarStatusAddon()
+            hook.plan_path = Path(directory) / "plan.json"
+            hook.armory_weapons = {shear_id: ("primary", "LAS-22"), scythe_id: ("primary", "LAS-5")}
+            path = hook.plan_path.with_name("inventory-preview.json")
+            manual = {"mixId": shear_id, "amount": 1, "isDiscovered": False}
+            for bulk in (False, True):
+                path.write_text(json.dumps({"enabled": True, "unlockAllWeapons": bulk,
+                                            "items": [] if bulk else [manual], "customization": []}),
+                                encoding="utf-8")
+                catalog = flow("/api/Progression/Items?refresh=1", [template])
+                catalog.request.headers = {"if-none-match": "old", "authorization": "keep"}
+                hook.request(catalog)
+                self.assertEqual(catalog.request.headers, {"authorization": "keep", "cache-control": "no-cache"})
+                hook.process_response(catalog)
+                self.assertEqual(json.loads(catalog.response.content), [template, shear])
+                self.assertEqual(catalog.response.headers, {"cache-control": "no-store"})
+                self.assertEqual(hook.item_catalog["added"], 1)
+                hook.process_response(catalog)
+                self.assertEqual(json.loads(catalog.response.content), [template, shear])
+                self.assertEqual(hook.item_catalog["added"], 0)
+                owned = {"mixId": scythe_id, "amount": 1, "isDiscovered": False}
+                inventory = flow(addon.INVENTORY, {"items": [owned]})
+                hook.process_response(inventory)
+                self.assertEqual(json.loads(inventory.response.content), {"items": [owned, manual]})
+            missing = flow(addon.ITEM_CATALOG, [])
+            hook.process_response(missing)
+            self.assertEqual(hook.item_catalog["status"], "missing_template")
+            self.assertEqual(json.loads(missing.response.content), [])
+            other_endpoint = flow(addon.ITEM_CATALOG + "/Customize/v2", [template])
+            hook.process_response(other_endpoint)
+            self.assertEqual(json.loads(other_endpoint.response.content), [template])
+
+    def test_catalog_templates_match_item_kind_and_prefer_series(self):
+        weapons = {1: ("primary", "AR-23"), 2: ("primary", "SG-8"),
+                   3: ("primary", "SG-8F"), 4: ("secondary", "P-2"),
+                   5: ("secondary", "P-41"), 6: ("throwable", "G-6"),
+                   7: ("throwable", ""), 8: ("primary", "SG-8A")}
+        native = [{"itemId": i, "mixId": i, "tags": [i]} for i in (1, 2, 4, 6)]
+        plan = {"items": [{"mixId": i} for i in (3, 5, 7, 8, 100)]}
+        result, missing = addon.rewrite_weapon_catalog(native, plan, weapons)
+        self.assertEqual(result[:4], native)
+        self.assertEqual([(r["itemId"], r["mixId"], r["tags"][0]) for r in result[4:]],
+                         [(3, 3, 2), (5, 5, 4), (7, 7, 6), (8, 8, 2)])
+        self.assertEqual(missing, 0)
+
+    def test_inventory_refresh_rewrites_items_without_optional_customization(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hook = addon.WarStatusAddon()
+            hook.plan_path = Path(directory) / "plan.json"
+            hook.plan_path.with_name("inventory-preview.json").write_text(json.dumps({
+                "enabled": True, "items": [{"mixId": 2112173638, "amount": 1, "isDiscovered": False}],
+                "customization": [],
+            }), encoding="utf-8")
+            sample = flow("/api/Progression/Inventory/?refresh=1", {"items": [], "loadouts": []})
+            sample.request.headers = {"if-none-match": "old", "if-modified-since": "old", "authorization": "keep"}
+            hook.request(sample)
+            self.assertEqual(sample.request.headers, {"authorization": "keep", "cache-control": "no-cache"})
+            hook.process_response(sample)
+            result = json.loads(sample.response.content)
+            self.assertEqual([row["mixId"] for row in result["items"]], [2112173638])
+            self.assertNotIn("customization", result)
+            self.assertEqual(hook.inventory, {"responses": 1, "status": "applied", "http_status": 200, "added": 1})
+            unsupported = flow(addon.INVENTORY, {"loadouts": []})
+            hook.process_response(unsupported)
+            self.assertEqual(hook.inventory["status"], "unsupported_response")
+            self.assertEqual(json.loads(unsupported.response.content), {"loadouts": []})
+
+    def test_unlock_all_ignores_legacy_hidden_items(self):
+        owned = {"mixId": 1, "amount": 4, "isDiscovered": True}
+        document = {"items": [owned], "customization": []}
+        manual = {"mixId": 2, "amount": 1, "isDiscovered": False}
+        plan = {"enabled": True, "items": [manual], "remove": [1, 2, 4], "customization": []}
+        hook = addon.WarStatusAddon()
+        hook.armory_weapons = {i: ("primary", "") for i in (1, 2, 3, 4)}
+        with tempfile.TemporaryDirectory() as directory:
+            hook.plan_path = Path(directory) / "plan.json"
+            path = hook.plan_path.with_name("inventory-preview.json")
+            for enabled, expected in ((True, [1, 2, 3, 4]), (False, [1, 2])):
+                path.write_text(json.dumps(dict(plan, unlockAllWeapons=enabled)), encoding="utf-8")
+                sample = flow(addon.INVENTORY, document)
+                hook.process_response(sample)
+                items = json.loads(sample.response.content)["items"]
+                self.assertEqual([row["mixId"] for row in items], expected)
+                self.assertEqual(items[:2], [owned, manual])
+
     def test_attachment_preview_matches_weapon_and_option_in_any_slot(self):
         def preset(weapon, index, slots):
             return {"mixId32": weapon, "index": index, "activeIndex": 2,
@@ -32,7 +123,7 @@ class TestWarStatusAddon(unittest.TestCase):
             preset(7, 1, [0, 0, 0, 11, 0, 0, 0, 0]),
             preset(8, 0, [0, 11, 0, 0, 0, 0, 0, 0]),
         ]}
-        plan = {"enabled": True, "items": [], "remove": [], "customization": [],
+        plan = {"enabled": True, "items": [], "customization": [],
                 "attachmentChanges": [{"weapon": 7, "from": 11, "to": 21},
                                       {"weapon": 7, "from": 21, "to": 31}]}
         preview = addon.rewrite_inventory(document, plan)
@@ -59,7 +150,6 @@ class TestWarStatusAddon(unittest.TestCase):
                 "enabled": True,
                 "items": [{"mixId": mix_id, "amount": 1, "isDiscovered": False}
                           for mix_id in [1, 3, 3]],
-                "remove": [2],
                 "customization": [{"mixId32": 1, "index": 0, "activeIndex": 0,
                                    "slots": [1] * 8, "modes": [0] * 4}],
             }
@@ -67,8 +157,8 @@ class TestWarStatusAddon(unittest.TestCase):
             valid = flow(addon.INVENTORY + "?refresh=1", document)
             hook.process_response(valid)
             result = json.loads(valid.response.content)
-            self.assertEqual([r["mixId"] for r in result["items"]], [1, 3])
-            self.assertEqual(result["items"][0], document["items"][0])
+            self.assertEqual([r["mixId"] for r in result["items"]], [1, 2, 3])
+            self.assertEqual(result["items"][:2], document["items"])
             self.assertEqual(result["customization"][0]["slots"], [1] * 8)
             self.assertTrue(result["customization"][0]["extra"])
             self.assertEqual(result["limitSettings"], document["limitSettings"])
@@ -96,9 +186,15 @@ class TestWarStatusAddon(unittest.TestCase):
         self.assertEqual(result['planetRegions'][1],dict(planetIndex=182,regionIndex=9,owner=3,health=300000,players=0,regerPerSecond=0,isAvailable=True,availabilityFactor=1))
         self.assertEqual(json.dumps(document),before)
         self.assertEqual(addon.rewrite_status(result,plan,set(),region_reference=reference)[1],0)
-        for wrong in (None,dict(reference,warId=800),dict(reference,layoutVersion=6),dict(reference,planetRegions=[]),dict(reference,planetRegions=reference['planetRegions']*2)):
+        for wrong in (None,dict(reference,warId=800),dict(reference,layoutVersion=6),dict(reference,planetRegions=reference['planetRegions']*2)):
             with self.assertRaises(addon.RegionAvailabilityError):addon.rewrite_status(document,plan,set(),region_reference=wrong)
             self.assertEqual(json.dumps(document),before)
+        # A planet without native definitions is skipped instead of discarding
+        # every other planet's initialization.
+        skipped=[]
+        result,count=addon.rewrite_status(document,plan,set(),region_reference=dict(reference,planetRegions=[]),region_skips=skipped)
+        self.assertEqual(skipped,[(182,'所选星球没有原生分区定义')])
+        self.assertEqual(result['planetRegions'],document['planetRegions'])
 
     def test_initialize_reopens_existing_liberated_regions_without_touching_other_planets(self):
         other=dict(planetIndex=10,regionIndex=1,owner=1,health=0,isAvailable=False,availabilityFactor=0)
@@ -115,6 +211,26 @@ class TestWarStatusAddon(unittest.TestCase):
         plan['targets'][0]['initialize_regions']=False
         unchanged,_=addon.rewrite_status(document,plan,set())
         self.assertEqual(unchanged['planetRegions'],document['planetRegions'])
+
+    def test_partial_region_plan_keeps_campaigns_and_records_skips(self):
+        instance=addon.WarStatusAddon()
+        instance.plan={'targets':[dict(planet=182,effects=[],campaign=True,campaign_race=3,initialize_regions=True),
+                                  dict(planet=260,effects=[],campaign=True,campaign_race=3,initialize_regions=True)]}
+        instance.allowed=set()
+        instance.effect_types={1400:71,1401:40,1129:32,1143:32}
+        instance.region_reference=dict(warId=801,layoutVersion=7,planetRegions=[dict(planetIndex=182,regionIndex=0,maxHealth=100)])
+        snapshots={};instance.snapshot=lambda name,data:snapshots.update({name:data})
+        document={'warId':801,'layoutVersion':7,'planetStatus':[{'index':182,'owner':1},{'index':260,'owner':1}],
+                  'planetActiveEffects':[],'campaigns':[],'planetRegions':[]}
+        f=flow('/api/WarSeason/801/Status',document)
+        instance.process_response(f)
+        result=json.loads(f.response.content)
+        self.assertEqual({c['planetIndex'] for c in result['campaigns']},{182,260})
+        self.assertEqual([r['regionIndex'] for r in result['planetRegions']],[0])
+        report=snapshots['campaign-diagnostics.json']
+        self.assertEqual(report['skipped_region_planets'],[260])
+        self.assertIn('260',report['region_error'])
+        self.assertEqual(instance.rewrites,1)
 
     def test_initialize_requires_explicit_enemy_and_campaign(self):
         for values in ({'initialize_regions':1},{'initialize_regions':True},{'initialize_regions':True,'campaign':True,'campaign_race':1}):
@@ -159,21 +275,50 @@ class TestWarStatusAddon(unittest.TestCase):
         before=json.dumps(document)
         plan={'targets':[{'planet':182,'effects':[],'open_regions':True}]}
         result,count=addon.rewrite_status(document,plan,set())
-        self.assertEqual(count,2)
+        self.assertEqual(count,1)
         self.assertEqual(json.dumps(document),before)
         self.assertEqual(result['planetRegions'][0],dict(document['planetRegions'][0],isAvailable=True,availabilityFactor=1))
         self.assertEqual(result['planetRegions'][1:],document['planetRegions'][1:])
         self.assertEqual(addon.rewrite_status(result,plan,set())[1],0)
 
+    def test_open_regions_never_publishes_a_liberated_sector(self):
+        document=dict(BASE,planetRegions=[dict(planetIndex=182,regionIndex=0,isAvailable=False,availabilityFactor=0,health=0,owner=1)])
+        before=json.dumps(document)
+        skipped=[]
+        result,count=addon.rewrite_status(document,{'targets':[{'planet':182,'effects':[],'open_regions':True}]},set(),region_skips=skipped)
+        self.assertEqual(count,0)
+        self.assertEqual(json.dumps(document),before)
+        self.assertEqual(result['planetRegions'][0]['isAvailable'],False)
+        self.assertEqual(skipped,[(182,'分区血量为 0，未开放')])
+
     def test_open_native_regions_validates_atomically(self):
         plan={'targets':[{'planet':182,'effects':[],'open_regions':True}]}
         valid=dict(planetIndex=182,regionIndex=0,isAvailable=False,availabilityFactor=0)
-        for regions in (None,[],[dict(valid,isAvailable=1)],[dict(valid,availabilityFactor=float('inf'))],[dict(valid,regionIndex='0')],[valid,dict(valid,availabilityFactor='0')]):
+        for regions in (None,[dict(valid,isAvailable=1)],[dict(valid,availabilityFactor=float('inf'))],[dict(valid,regionIndex='0')],[valid,dict(valid,availabilityFactor='0')]):
             document=dict(BASE,planetRegions=regions);before=json.dumps(document)
             with self.assertRaises(ValueError):addon.rewrite_status(document,plan,set())
             self.assertEqual(json.dumps(document),before)
+        # An empty native state list only means "this planet has no region yet".
+        skipped=[]
+        document=dict(BASE,planetRegions=[])
+        result,count=addon.rewrite_status(document,plan,set(),region_skips=skipped)
+        self.assertEqual(skipped,[(182,'所选星球缺少原生分区状态')])
+        self.assertEqual(result['planetRegions'],[])
         for flag in ('true',1,None):
             with self.assertRaises(ValueError):addon.normalize_targets({'targets':[{'planet':182,'open_regions':flag}]})
+
+    def test_missing_region_planet_does_not_disable_other_regions(self):
+        document=dict(BASE,warId=801,layoutVersion=7,planetStatus=[{'index':182},{'index':260}],
+                      planetRegions=[dict(planetIndex=182,regionIndex=0,owner=1,health=0,isAvailable=False,availabilityFactor=0)])
+        reference=dict(warId=801,layoutVersion=7,planetRegions=[dict(planetIndex=182,regionIndex=0,maxHealth=100)])
+        plan={'targets':[dict(planet=182,effects=[],campaign=True,campaign_race=3,initialize_regions=True),
+                         dict(planet=260,effects=[],campaign=True,campaign_race=3,initialize_regions=True)]}
+        skipped=[]
+        result,count=addon.rewrite_status(document,plan,set(),region_reference=reference,region_skips=skipped)
+        self.assertEqual(skipped,[(260,'所选星球没有原生分区定义')])
+        self.assertEqual(result['planetRegions'][0]['owner'],3)
+        self.assertEqual(result['planetRegions'][0]['health'],50)
+        self.assertEqual({c['planetIndex'] for c in result['campaigns']},{182,260})
 
     def test_region_diagnostics_report_before_and_after(self):
         instance=addon.WarStatusAddon();instance.plan={'targets':[{'planet':182,'effects':[],'open_regions':True}]}
@@ -205,6 +350,31 @@ class TestWarStatusAddon(unittest.TestCase):
         instance.process_response(flow('/api/WarSeason/801/Status',{'planetStatus':[{'index':260,'owner':1}],'planetActiveEffects':[],'campaigns':[],'planetEvents':None,'jointOperations':None}))
         self.assertEqual(instance.rewrites,2)
         self.assertFalse(snapshots['campaign-diagnostics.json']['targets'][0]['server_events'])
+
+    def test_new_campaign_uses_campaign_count(self):
+        document=dict(BASE,planetStatus=[{'index':182,'owner':2}],campaigns=[])
+        plan={'targets':[{'planet':182,'effects':[],'campaign':True,'campaign_race':3}]}
+        result,_=addon.rewrite_status(document,plan,set())
+        self.assertEqual(result['campaigns'][0]['count'],20)
+        plan['targets'][0]['campaign_count']=12
+        result,_=addon.rewrite_status(document,plan,set())
+        self.assertEqual(result['campaigns'][0]['count'],12)
+        # Server-owned campaigns keep their own operation count.
+        document=dict(BASE,planetStatus=[{'index':182,'owner':2}],
+                      campaigns=[{'id':7,'planetIndex':182,'type':0,'count':38,'race':2}])
+        result,_=addon.rewrite_status(document,plan,set())
+        self.assertEqual(result['campaigns'][0]['count'],38)
+        for bad in (0,-1,'20',None):
+            with self.assertRaises(ValueError):
+                addon.normalize_targets({'targets':[{'planet':182,'campaign_count':bad}]})
+
+    def test_multiple_temp_stratagems_are_preserved_even_with_an_old_limit(self):
+        catalog={1400:71,1401:40,1129:32,1143:32,1388:32}
+        document = dict(BASE, planetActiveEffects=[{'index':182,'galacticEffectId':1129}])
+        plan = {'targets': [{'planet':182, 'effects':[1400,1401,1143,1129,1388],
+                             'max_temp_stratagems': 1}]}
+        result, _ = addon.rewrite_status(document, plan, set(catalog), effect_types=catalog, recovery={})
+        self.assertEqual([e['galacticEffectId'] for e in result['planetActiveEffects']], [1129,1400,1401,1143,1388])
 
     def ready(self):
         instance = addon.WarStatusAddon()
@@ -441,9 +611,33 @@ class TestWarStatusAddon(unittest.TestCase):
         plan={'targets':[{'planet':182,'effects':[],'campaign':True}]}
         original=dict(BASE,campaigns=[{'id':10,'planetIndex':182,'type':0,'count':0}])
         result,count=addon.rewrite_status(original,plan,None)
-        self.assertEqual(result['campaigns'][0]['count'],1)
+        self.assertEqual(result['campaigns'][0]['count'],20)
         self.assertGreater(count,0)
         self.assertEqual(original['campaigns'][0]['count'],0)
+
+    def test_force_open_uses_native_city_regions_and_isolates_invalid_targets(self):
+        document = dict(BASE, warId=801, layoutVersion=727,
+                        planetStatus=[{'index': i, 'owner': 1, 'health': 0} for i in (0, 227, 260)],
+                        campaigns=[], planetRegions=[])
+        reference = dict(warId=801, layoutVersion=727,
+                         planetInfos=[{'index': 227, 'maxHealth': 1000}],
+                         planetRegions=[{'planetIndex': 0, 'regionIndex': 2, 'maxHealth': 400},
+                                        {'planetIndex': 260, 'regionIndex': 0, 'maxHealth': 0}])
+        plan = {'targets': [{'planet': i, 'effects': [113], 'force_open': True,
+                             'campaign_type': 3, 'campaign_race': 4} for i in (260, 227, 0, 999)]}
+        recovery, skips = {}, []
+        result, _ = addon.rewrite_status(document, plan, None, region_reference=reference,
+                                         region_skips=skips, recovery=recovery)
+        self.assertEqual([(row['planetIndex'], row['type'], row['race'], row['count'])
+                          for row in result['campaigns']], [(260, 0, 4, 20), (227, 0, 4, 20), (0, 3, 4, 20)])
+        self.assertEqual(result['planetStatus'][1], {'index': 227, 'owner': 4, 'health': 500})
+        self.assertEqual([(row['planetIndex'], row['regionIndex'], row['health'])
+                          for row in result['planetRegions']], [(0, 2, 200)])
+        self.assertEqual(recovery['missing_planets'], [999])
+        self.assertEqual(recovery['unavailable_effects'], {0: [113], 227: [113], 260: [113]})
+        self.assertEqual(set(recovery['campaign_fallbacks']), {260, 227})
+        self.assertEqual(skips[0][0], 260)
+        self.assertEqual(document['campaigns'], [])
 
     def test_status_and_catalog_cache_validators_are_removed(self):
         instance=addon.WarStatusAddon()

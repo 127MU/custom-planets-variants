@@ -38,15 +38,15 @@ fn validate_inventory_preview(plan: &Value) -> Result<()> {
             .context("Invalid mix ID")
     }
     ensure!(plan["enabled"].is_boolean(), "Invalid inventory switch");
+    if let Some(value) = plan.get("unlockAllWeapons") {
+        ensure!(value.is_boolean(), "Invalid unlock-all-weapons switch");
+    }
     for row in records(&plan["items"], "items")? {
         ensure!(id(&row["mixId"])? != 0, "Invalid item mix ID");
         ensure!(
             row["amount"] == 1 && row["isDiscovered"].is_boolean(),
             "Invalid item preview"
         );
-    }
-    for value in records(&plan["remove"], "remove")? {
-        ensure!(id(value)? != 0, "Invalid removed mix ID");
     }
     for row in records(&plan["customization"], "customization")? {
         ensure!(id(&row["mixId32"])? != 0, "Invalid customization mix ID");
@@ -72,6 +72,45 @@ fn validate_inventory_preview(plan: &Value) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn armory_weapon_catalog() -> Result<Vec<(u32, String, String)>> {
+    let catalog: Value = serde_json::from_str(include_str!("../../ui/assets/armory_catalog.json"))?;
+    let rows = catalog["weapons"]
+        .as_array()
+        .context("Missing weapon catalog")?;
+    Ok(rows
+        .iter()
+        .filter_map(|row| {
+            let kind = row["kind"].as_str()?;
+            let id = u32::try_from(row["id"].as_u64()?).ok()?;
+            if id == 0 || !matches!(kind, "primary" | "secondary" | "throwable") {
+                return None;
+            }
+            let model = row["code"]
+                .as_str()
+                .filter(|code| !code.is_empty())
+                .or_else(|| row["name"].as_str())
+                .unwrap_or_default();
+            Some((id, kind.to_owned(), model.to_owned()))
+        })
+        .collect())
+}
+
+fn steam_option_path(path: &Path) -> String {
+    // Steam 不解析 `\\?\` verbatim 前缀：带前缀的启动项会被它当成非路径参数。
+    // 配置目录以 verbatim 形式传入时就会生成这种启动项（issue #1）。
+    let text = path.to_string_lossy().into_owned();
+    let plain = match text.strip_prefix("\\\\?\\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest,
+        _ => return text,
+    };
+    // 只剥离普通盘符短路径；长路径仍需要 verbatim 前缀才能打开文件。
+    if plain.len() < 200 {
+        plain.to_string()
+    } else {
+        text
+    }
 }
 struct Host {
     profile: PathBuf,
@@ -284,7 +323,10 @@ impl Host {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if !prepare {
-            c.env("CPV_WAR_MITM_PORT", port.to_string());
+            c.env("CPV_WAR_MITM_PORT", port.to_string()).env(
+                "CPV_ARMORY_WEAPON_CATALOG",
+                serde_json::to_string(&armory_weapon_catalog()?)?,
+            );
         }
         let mut child = platform::hidden(&mut c).spawn()?;
         let job = match platform::Job::new(&child) {
@@ -402,7 +444,7 @@ impl Host {
         if fs::read(&dst).unwrap_or_default() != bytes {
             atomic_write(&dst, &bytes)?;
         }
-        Ok(format!("\"{}\" %command%", dst.display()))
+        Ok(format!("\"{}\" %command%", steam_option_path(&dst)))
     }
     fn request(&mut self, method: &str, args: Value) -> Result<Value> {
         match method {
@@ -413,6 +455,11 @@ impl Host {
             "catalog" => {
                 self.poll()?;
                 Ok(self.catalog.clone())
+            }
+            "save_planet_catalog" => {
+                save_planet_catalog(&self.profile, &args)?;
+                self.catalog = catalog(&self.profile)?;
+                Ok(self.catalog["planets"].clone())
             }
             "save_target" => {
                 let target = &args["target"];
@@ -454,16 +501,21 @@ impl Host {
             }
             "inventory_preview" => {
                 let path = self.root().join("inventory-preview.json");
-                if args.get("enabled").is_some() {
-                    validate_inventory_preview(&args)?;
-                    write_json(&path, &args)?;
-                    return Ok(args);
+                let saving = args.get("enabled").is_some();
+                let mut plan = if saving {
+                    args
+                } else if path.exists() {
+                    read_json(&path)?
+                } else {
+                    json!({"enabled":true,"items":[],"customization":[]})
+                };
+                if let Some(fields) = plan.as_object_mut() {
+                    fields.remove("remove");
                 }
-                if !path.exists() {
-                    return Ok(json!({"enabled":true,"items":[],"remove":[],"customization":[]}));
-                }
-                let plan = read_json(&path)?;
                 validate_inventory_preview(&plan)?;
+                if saving {
+                    write_json(&path, &plan)?;
+                }
                 Ok(plan)
             }
             "settings" => {
@@ -748,6 +800,26 @@ mod tests {
         let before = fs::read(p.join("war-targets.json")).unwrap();
         assert!(h.persist(json!([{"planet":-1,"effects":[]}])).is_err());
         assert_eq!(fs::read(p.join("war-targets.json")).unwrap(), before);
+    }
+    #[test]
+    fn steam_option_never_uses_verbatim_prefix() {
+        assert_eq!(
+            steam_option_path(Path::new(r"\\?\C:\CPV\war-proxy\steam-bridge.exe")),
+            r"C:\CPV\war-proxy\steam-bridge.exe"
+        );
+        assert_eq!(
+            steam_option_path(Path::new(r"C:\CPV\steam-bridge.exe")),
+            r"C:\CPV\steam-bridge.exe"
+        );
+        assert_eq!(
+            steam_option_path(Path::new(r"\\server\share\steam-bridge.exe")),
+            r"\\server\share\steam-bridge.exe"
+        );
+        let long = format!("C:\\{}\\steam-bridge.exe", "a".repeat(240));
+        assert_eq!(
+            steam_option_path(Path::new(&format!(r"\\?\{long}"))),
+            format!(r"\\?\{long}")
+        );
     }
     #[cfg(windows)]
     #[test]
