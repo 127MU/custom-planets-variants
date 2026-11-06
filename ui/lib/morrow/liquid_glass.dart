@@ -88,12 +88,16 @@ class LiquidGlassSurface extends StatefulWidget {
     this.transparentCanvas = true,
     this.material,
     this.backgroundGradient,
+    this.backgroundImage,
+    this.backgroundImageOpacity = 1,
   });
   final GlassMaterial? material;
 
   /// An isolated app backdrop. Refraction samples only this background, never
   /// previously painted cards, text or another page during transitions.
   final Gradient? backgroundGradient;
+  final ui.Image? backgroundImage;
+  final double backgroundImageOpacity;
   final Widget child;
   final Color tint;
   final bool dark, canvas, readable;
@@ -297,6 +301,8 @@ class _LiquidGlassSurfaceState extends State<LiquidGlassSurface>
                                   child: CustomPaint(
                                     painter: _IsolatedGlassBackgroundPainter(
                                       gradient: gradient,
+                                      image: widget.backgroundImage,
+                                      opacity: widget.backgroundImageOpacity,
                                       viewport: MediaQuery.sizeOf(context),
                                       origin: () {
                                         final box =
@@ -468,10 +474,14 @@ class _IsolatedGlassBackgroundPainter extends CustomPainter {
     required this.gradient,
     required this.viewport,
     required this.origin,
+    required this.image,
+    required this.opacity,
   });
   final Gradient gradient;
   final Size viewport;
   final Offset Function() origin;
+  final ui.Image? image;
+  final double opacity;
   @override
   void paint(Canvas canvas, Size size) {
     if (size.isEmpty || viewport.isEmpty) return;
@@ -486,11 +496,25 @@ class _IsolatedGlassBackgroundPainter extends CustomPainter {
       Offset.zero & size,
       Paint()..shader = gradient.createShader(bounds),
     );
+    if (image case final value?) {
+      canvas.save();
+      canvas.clipRect(Offset.zero & size);
+      paintImage(
+        canvas: canvas,
+        rect: bounds,
+        image: value,
+        fit: BoxFit.cover,
+        opacity: opacity,
+      );
+      canvas.restore();
+    }
   }
 
   @override
   bool shouldRepaint(_IsolatedGlassBackgroundPainter old) =>
       old.gradient != gradient ||
       old.viewport != viewport ||
+      old.image != image ||
+      old.opacity != opacity ||
       old.origin != origin;
 }

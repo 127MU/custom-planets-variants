@@ -13,6 +13,7 @@ from pathlib import Path
 HOST = "api.live.prod.thehelldiversgame.com"
 STATUS = re.compile(r"^/api/WarSeason/[0-9]+/Status$")
 WAR_INFO = re.compile(r"^/api/WarSeason/[0-9]+/WarInfo$")
+INVENTORY = "/api/Progression/inventory"
 MAX_BODY = 8 * 1024 * 1024
 # Verified type40 tag/type71 presence pairs, war 801. Never infer by ID adjacency.
 EFFECT_PAIRS = ((1202,1203),(1243,1245),(1244,1386),(1248,1249),(1303,1310),
@@ -21,6 +22,73 @@ EFFECT_PAIRS = ((1202,1203),(1243,1245),(1244,1386),(1248,1249),(1303,1310),
 # Verified native bots_cyborgs presence. Only use ORIGINAL server effects to
 # infer a liberated planet's enemy; user-added cross-faction effects don't count.
 NATIVE_ENEMY_EFFECTS = {1361: 3}
+
+
+def rewrite_inventory(document, plan):
+    """Apply a local preview without changing requests or upstream state."""
+    def uint(value):
+        return type(value) is int and 0 <= value <= 0xFFFFFFFF
+
+    if not isinstance(document, dict) or not isinstance(plan, dict) or plan.get("enabled") is not True:
+        return document
+    items, customized = document.get("items"), document.get("customization")
+    added, removed, overrides = (plan.get(key) for key in ("items", "remove", "customization"))
+    if not all(isinstance(rows, list) and len(rows) <= 128 for rows in (added, removed, overrides)):
+        return document
+    if not isinstance(items, list) or not isinstance(customized, list):
+        return document
+    if not all(isinstance(row, dict) and uint(row.get("mixId")) for row in items):
+        return document
+    if not all(isinstance(row, dict) and uint(row.get("mixId32")) and uint(row.get("index"))
+               for row in customized):
+        return document
+    if not all(isinstance(row, dict) and uint(row.get("mixId")) and row["mixId"]
+               and type(row.get("amount")) is int and row["amount"] == 1
+               and type(row.get("isDiscovered")) is bool for row in added):
+        return document
+    if not all(uint(value) and value for value in removed):
+        return document
+    fields = ("mixId32", "index", "activeIndex", "slots", "modes")
+    for row in overrides:
+        if not isinstance(row, dict) or not all(uint(row.get(key)) for key in fields[:3]) or not row["mixId32"]:
+            return document
+        for key, length in (("slots", 8), ("modes", 4)):
+            values = row.get(key)
+            if not isinstance(values, list) or len(values) != length or not all(map(uint, values)):
+                return document
+    changes = plan.get("attachmentChanges", [])
+    if not isinstance(changes, list) or len(changes) > 128:
+        return document
+    swaps = {}
+    for row in changes:
+        if not isinstance(row, dict) or not all(uint(row.get(key)) and row[key]
+                for key in ("weapon", "from", "to")) or row["from"] == row["to"]:
+            return document
+        swaps.setdefault(row["weapon"], {})[row["from"]] = row["to"]
+    hidden = set(removed)
+    result_items = [row for row in items if row["mixId"] not in hidden]
+    owned = {row["mixId"] for row in result_items}
+    for row in added:
+        mix_id = row["mixId"]
+        if mix_id not in owned and mix_id not in hidden:
+            result_items.append({key: row[key] for key in ("mixId", "amount", "isDiscovered")})
+            owned.add(mix_id)
+    replacements = {(row["mixId32"], row["index"]): {key: row[key] for key in fields}
+                    for row in overrides}
+    result_customized = []
+    for row in customized:
+        replacement = replacements.pop((row["mixId32"], row["index"]), None)
+        result_customized.append({**row, **replacement} if replacement else row)
+    result_customized.extend(replacements.values())
+    for index, row in enumerate(result_customized):
+        by_option = swaps.get(row["mixId32"])
+        slots = row.get("slots")
+        if by_option and isinstance(slots, list) and len(slots) == 8 and all(map(uint, slots)):
+            # Match actual option IDs, never treat a data-table slot enum as an array index.
+            result_customized[index] = {**row, "slots": [by_option.get(value, value) for value in slots]}
+    if result_items == items and result_customized == customized:
+        return document
+    return {**document, "items": result_items, "customization": result_customized}
 
 
 class ApiOnlyRouter:
@@ -655,6 +723,30 @@ class WarStatusAddon:
                 self.region_reference_error=type(error).__name__
         self.process_response(flow)
 
+    def preview_inventory(self, response):
+        if not self.plan_path:
+            return
+        try:
+            with self.plan_path.with_name("inventory-preview.json").open("rb") as config:
+                raw_plan = config.read(65537)
+            if len(raw_plan) > 65536:
+                return
+            plan = json.loads(raw_plan)
+            if not isinstance(plan, dict) or plan.get("enabled") is not True:
+                return
+            raw = response.content
+            if raw is None or len(raw) > MAX_BODY:
+                return
+            original = json.loads(raw)
+            changed = rewrite_inventory(original, plan)
+            if changed is not original:
+                response.content = json.dumps(changed, separators=(",", ":")).encode("utf-8")
+                response.headers.pop("etag", None)
+                response.headers["cache-control"] = "no-store"
+                self.health("已应用军械库本地预览")
+        except (OSError, ValueError, TypeError):
+            pass  # A missing/invalid plan or changed API schema leaves the response intact.
+
     def process_response(self, flow):
         request, response = flow.request, flow.response
         if request.pretty_host.lower() == HOST:
@@ -665,6 +757,9 @@ class WarStatusAddon:
         if request.method != "GET" or request.pretty_host.lower() != HOST or response.status_code != 200:
             return
         path = request.path.split("?", 1)[0]
+        if path == INVENTORY:
+            self.preview_inventory(response)
+            return
         if path != "/api/WarSeason/GalacticWarEffects" and not STATUS.fullmatch(path) and not WAR_INFO.fullmatch(path):
             return
         try:

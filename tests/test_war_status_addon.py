@@ -22,6 +22,71 @@ def flow(path, document, host=addon.HOST, method="GET"):
 
 
 class TestWarStatusAddon(unittest.TestCase):
+    def test_attachment_preview_matches_weapon_and_option_in_any_slot(self):
+        def preset(weapon, index, slots):
+            return {"mixId32": weapon, "index": index, "activeIndex": 2,
+                    "slots": slots, "modes": [1, 2, 3, 4]}
+
+        document = {"items": [], "customization": [
+            preset(7, 0, [0, 11, 0, 21, 0, 0, 0, 0]),
+            preset(7, 1, [0, 0, 0, 11, 0, 0, 0, 0]),
+            preset(8, 0, [0, 11, 0, 0, 0, 0, 0, 0]),
+        ]}
+        plan = {"enabled": True, "items": [], "remove": [], "customization": [],
+                "attachmentChanges": [{"weapon": 7, "from": 11, "to": 21},
+                                      {"weapon": 7, "from": 21, "to": 31}]}
+        preview = addon.rewrite_inventory(document, plan)
+        self.assertEqual(preview["customization"], [
+            preset(7, 0, [0, 21, 0, 31, 0, 0, 0, 0]),
+            preset(7, 1, [0, 0, 0, 21, 0, 0, 0, 0]),
+            document["customization"][2],
+        ])
+        self.assertEqual(document["customization"][0]["slots"][1], 11)
+
+    def test_inventory_preview_uses_only_exact_get_and_preserves_owned_rows(self):
+        document = {
+            "items": [{"mixId": 1, "amount": 9, "isDiscovered": True},
+                      {"mixId": 2, "amount": 1, "isDiscovered": False}],
+            "customization": [{"mixId32": 1, "index": 0, "activeIndex": 1,
+                               "slots": [0] * 8, "modes": [0] * 4, "extra": True}],
+            "limitSettings": {"sample": 12},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            hook = addon.WarStatusAddon()
+            hook.plan_path = Path(directory) / "plan.json"
+            config = Path(directory) / "inventory-preview.json"
+            plan = {
+                "enabled": True,
+                "items": [{"mixId": mix_id, "amount": 1, "isDiscovered": False}
+                          for mix_id in [1, 3, 3]],
+                "remove": [2],
+                "customization": [{"mixId32": 1, "index": 0, "activeIndex": 0,
+                                   "slots": [1] * 8, "modes": [0] * 4}],
+            }
+            config.write_text(json.dumps(plan), encoding="utf-8")
+            valid = flow(addon.INVENTORY + "?refresh=1", document)
+            hook.process_response(valid)
+            result = json.loads(valid.response.content)
+            self.assertEqual([r["mixId"] for r in result["items"]], [1, 3])
+            self.assertEqual(result["items"][0], document["items"][0])
+            self.assertEqual(result["customization"][0]["slots"], [1] * 8)
+            self.assertTrue(result["customization"][0]["extra"])
+            self.assertEqual(result["limitSettings"], document["limitSettings"])
+            self.assertEqual(valid.response.headers, {"cache-control": "no-store"})
+            ignored = [
+                flow(addon.INVENTORY + "/other", document),
+                flow(addon.INVENTORY, document, method="PUT"),
+                flow(addon.INVENTORY, document, host="example.test"),
+            ]
+            for sample in ignored:
+                hook.process_response(sample)
+                self.assertEqual(json.loads(sample.response.content), document)
+            plan["enabled"] = False
+            config.write_text(json.dumps(plan), encoding="utf-8")
+            disabled = flow(addon.INVENTORY, document)
+            hook.process_response(disabled)
+            self.assertEqual(json.loads(disabled.response.content), document)
+
     def test_initialize_regions_uses_native_ids_and_preserves_existing_state(self):
         document=dict(BASE,warId=801,layoutVersion=7,planetRegions=[dict(planetIndex=182,regionIndex=3,owner=2,health=19,isAvailable=False,availabilityFactor=0)])
         plan={'targets':[{'planet':182,'effects':[],'campaign':True,'campaign_race':3,'initialize_regions':True}]}

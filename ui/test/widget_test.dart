@@ -18,6 +18,12 @@ class FakeCore implements CpvApi {
     'useSystemProxy': false,
   };
   final Json state = {'active': false, 'ready': false, 'status': 'Ready'};
+  Json inventory = {
+    'enabled': true,
+    'items': [],
+    'remove': [],
+    'customization': [],
+  };
   final Json catalog = {
     'planets': [
       {'id': 64, 'name': '生化斯坦', 'englishName': 'CYBERSTAN'},
@@ -55,6 +61,9 @@ class FakeCore implements CpvApi {
       case 'settings':
         settings.addAll(args);
         return settings;
+      case 'inventory_preview':
+        if (args.isNotEmpty) inventory = args;
+        return inventory;
       case 'save_target':
         targets = [args['target']];
         return targets;
@@ -109,6 +118,45 @@ void main() {
     expect(matches(row, '1431'), isTrue);
     expect(matches(row, 'bugs_acid'), isTrue);
     expect(matches(row, 'other'), isFalse);
+  });
+  testWidgets('armory adds a hidden weapon by name and saves its item ID', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1280, 1000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final core = FakeCore();
+    await tester.pumpWidget(
+      CpvApp(core: core, initial: core.initial, nativeWindow: false),
+    );
+    await tester.tap(find.byIcon(Icons.inventory_2_outlined));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('选武器').first);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, '切变');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('LAS-22 切变'));
+    await tester.pumpAndSettle();
+    expect(find.text('LAS-22 切变'), findsOneWidget);
+    await tester.ensureVisible(find.text('保存方案'));
+    await tester.tap(find.text('保存方案'));
+    await tester.pumpAndSettle();
+    expect((core.inventory['items'] as List).single['mixId'], 2112173638);
+    await tester.ensureVisible(find.text('浏览配件'));
+    await tester.tap(find.text('浏览配件'));
+    await tester.pumpAndSettle();
+    final search = find.byType(TextField).last;
+    await tester.enterText(search, '4倍瞄具');
+    await tester.pumpAndSettle();
+    expect(find.text('4 倍瞄具'), findsOneWidget);
+    await tester.enterText(search, 'COMBAT SCOPE 4x');
+    await tester.pumpAndSettle();
+    expect(find.text('4 倍瞄具'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
   });
   test('heartbeat alone does not rebuild the workspace', () {
     expect(
@@ -228,7 +276,13 @@ void main() {
       scrollable: find.byType(Scrollable).last,
     );
     expect(find.byIcon(Icons.fact_check_outlined), findsOneWidget);
-    expect(find.byIcon(Icons.download), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.widgetWithText(OutlinedButton, '导出诊断日志'),
+        matching: find.byIcon(Icons.download),
+      ),
+      findsOneWidget,
+    );
     expect(find.textContaining('昼夜、傍晚'), findsNothing);
     await tester.pumpWidget(const SizedBox());
   });
@@ -276,8 +330,8 @@ void main() {
           return {
             'schema': 1,
             'repository': projectRepository,
-            'version': '2.0.1',
-            'asset': 'CPV_2.0.1.exe',
+            'version': '2.0.2',
+            'asset': 'CPV_2.0.2.exe',
             'notes': '修复更新日志',
             'sha256': '',
           };
@@ -300,9 +354,11 @@ void main() {
       );
       expect(find.text('作者: 127MU'), findsOneWidget);
       expect(find.text(projectUri.toString()), findsOneWidget);
+      await tester.ensureVisible(find.text('检查更新'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('检查更新'));
       await tester.pumpAndSettle();
-      expect(find.text('发现新版本 2.0.1'), findsOneWidget);
+      expect(find.text('发现新版本 2.0.2'), findsOneWidget);
       expect(find.text('修复更新日志'), findsOneWidget);
       expect(find.text('GitHub 下载'), findsOneWidget);
       expect(find.text('镜像 1 下载'), findsOneWidget);
@@ -351,7 +407,15 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
     }
+    await tester.ensureVisible(find.text('液态玻璃'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('液态玻璃'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.text('颜色模式'),
+      -500,
+      scrollable: find.byType(Scrollable).last,
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byType(DropdownButton<String>).first);
     await tester.pumpAndSettle();

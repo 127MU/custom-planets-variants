@@ -1,4 +1,4 @@
-param([switch]$Test, [string]$Payload)
+param([switch]$Test, [string]$Payload, [string]$PayloadManifest)
 $ErrorActionPreference = 'Stop'
 $buildTemp = Join-Path $PSScriptRoot '..\build\rust-tmp'
 New-Item -ItemType Directory -Path $buildTemp -Force | Out-Null
@@ -12,10 +12,12 @@ $sdkBin = Join-Path 'C:\Program Files (x86)\Windows Kits\10\bin' "$($sdk.Name)\x
 $env:PATH = "$env:CARGO_HOME\bin;$($compiler.FullName)\bin\Hostx64\x64;$sdkBin;$env:PATH"
 $env:LIB = "$($compiler.FullName)\lib\x64;$($sdk.FullName)\ucrt\x64;$($sdk.FullName)\um\x64"
 $resolvedPayload = if ($Payload) { (Resolve-Path -LiteralPath $Payload).Path } else { $null }
+$resolvedManifest = if ($PayloadManifest) { (Resolve-Path -LiteralPath $PayloadManifest).Path } else { $null }
 Push-Location "$PSScriptRoot\..\backend"
 try {
     if ($Payload) {
         $env:CPV_PAYLOAD = $resolvedPayload
+        $env:CPV_PAYLOAD_MANIFEST = $resolvedManifest
         cargo rustc --release --features bundle --bin cpv-launcher -- -C target-feature=+crt-static
     } elseif ($Test) { cargo test } else { cargo build --release }
     if ($LASTEXITCODE -ne 0) { throw "Rust build failed ($LASTEXITCODE)" }
