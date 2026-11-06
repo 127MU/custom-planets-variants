@@ -10,7 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
-pub const VERSION: &str = "2.0.1";
+pub const VERSION: &str = "2.0.2";
 pub fn stamp() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -235,7 +235,7 @@ pub fn diagnose(profile: &Path, state: &Value) -> Result<Value> {
         .into_iter()
         .filter(|key| std::env::var_os(key).is_some())
         .collect();
-    let report = json!({"schema":1,"product":"自定义星球和变种 / Custom Planets & Variants","version":VERSION,"created_at_epoch_ms":stamp(),"os":std::env::consts::OS,"architecture":std::env::consts::ARCH,"proxy_environment_variables_present":env_flags,"checks":checks,"state":{"active":state["active"],"ready":state["ready"],"certificate_trusted":state["trusted"],"failures":state["health"]["failures"],"connection":state["health"]["connection"],"statuses":state["health"]["statuses"],"rewrites":state["health"]["rewrites"]},"privacy":"No account identifiers, authentication headers, HTTP bodies, CA private keys or screenshots collected."});
+    let report = json!({"schema":1,"product":"自定义星球和变种 / Custom Planets & Variants","version":VERSION,"created_at_epoch_ms":stamp(),"os":std::env::consts::OS,"architecture":std::env::consts::ARCH,"proxy_environment_variables_present":env_flags,"checks":checks,"state":{"active":state["active"],"ready":state["ready"],"certificate_trusted":state["trusted"],"failures":state["health"]["failures"],"connection":state["health"]["connection"],"inventory":state["health"]["inventory"],"item_catalog":state["health"]["item_catalog"],"statuses":state["health"]["statuses"],"rewrites":state["health"]["rewrites"]},"privacy":"No account identifiers, authentication headers, HTTP bodies, CA private keys or screenshots collected."});
     record(
         &directory(profile),
         "core.jsonl",

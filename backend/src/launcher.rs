@@ -14,7 +14,8 @@ use std::{
 const PAYLOAD: &[u8] = include_bytes!(env!("CPV_PAYLOAD"));
 #[cfg(cpv_xz_payload)]
 const PAYLOAD_MANIFEST: &[u8] = include_bytes!(env!("CPV_PAYLOAD_MANIFEST"));
-const PREFIX: &str = "CPV_2.0.1";
+// 单文件载荷内的目录前缀必须与打包脚本一致；两者都跟随 Cargo.toml 版本。
+const PREFIX: &str = concat!("CPV_", env!("CARGO_PKG_VERSION"));
 fn hash(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }

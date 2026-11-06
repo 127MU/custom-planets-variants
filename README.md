@@ -9,10 +9,11 @@
 
 - **星球方案**：按名称或 ID 搜索，添加、编辑、启用和导入导出方案。
 - **效果目录**：中英文搜索、分类筛选、多选、仅显示已选；分类栏支持鼠标拖拽、滚轮和横向滚动条。
-- **作战配置**：作战类型、敌人阵营、分区初始化及防守参数。
+- **作战配置**：作战类型、作战数量、敌人阵营、分区初始化及防守参数。城市与特殊星球战役需要足够的作战槽（默认 20）。
+- **临时战备**：同一星球可选择多条临时配发战备。游戏内有数量限制，超出时可能无法正常使用。
 - **天气预设**：已有依据的异界风暴效果；实验性候选在界面内标注。
 - **个性化**：自定义背景图片、中英文切换、浅色 / 深色 / 跟随系统、强调色，以及磨砂、液态玻璃和实色材质。
-- **军械库**：按名称、型号或 ID 选择武器和配件。库存方案在游戏下次读取库存时应用。配件替换只处理对应武器已有方案中的原配件。目录数据来自 [hd2-datamined](https://github.com/deepseekv41flash/hd2-datamined/blob/master/docs/tables/WEAPON-CUSTOMIZATION-26251122.md)，装备效果需实机验证。
+- **军械库**：按名称、型号或 ID 多选主武器、副武器和投掷物，也可批量预览。方案在游戏重新登录并读取物品目录及库存时应用。缺少目录条目的装备使用同类模板，未命名条目属于实验性预览。配件替换匹配武器已有方案中的原配件。 [物品目录数据](https://github.com/deepseekv41flash/hd2-datamined/blob/master/docs/tables/WEAPON-CUSTOMIZATION-26251122.md) · [解锁总览](https://github.com/deepseekv41flash/hd2-network-proxy/blob/master/docs/UNLOCK-MAP-2026-11-06.md)
 - **连接管理**：生成本机证书、确认后加入当前用户信任、Steam 启动桥接和可选上游 HTTP 代理。
 - **诊断模式**：检查配置目录、程序完整性、证书和代理状态，导出本地 JSON 日志。
 
@@ -71,8 +72,8 @@ cd ..
 准备基于官方 mitmproxy 的 Windows Python 运行时（`python.exe`、`proxy_main.py`、依赖与 `runtime.json` 文件哈希清单），然后打包：
 
 ```powershell
-python tools/package-rust.py --output dist/release --proxy-runtime C:/path/to/mitmproxy-runtime
-.\tools\build-rust.ps1 -Payload dist/release/CPV_2.0.1_Windows.zip
+python tools/package-rust.py --output dist/release --proxy-runtime C:/path/to/mitmproxy-runtime --solid-payload build/cpv-payload.xz
+.\tools\build-rust.ps1 -Payload build/cpv-payload.xz -PayloadManifest dist/release/CPV_2.0.2/manifest.json
 ```
 
 启动器输出为 `backend/target/release/cpv-launcher.exe`，可复制并命名为 `自定义星球和变种.exe`。源码不提交 Python 运行时或生成的二进制文件。打包会校验运行时哈希和关键图标字形；出现图标缺失提示时，请先 `flutter clean` 后重新构建。
