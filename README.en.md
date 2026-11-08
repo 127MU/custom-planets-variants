@@ -73,7 +73,7 @@ Prepare an official-mitmproxy-based Windows Python runtime containing `python.ex
 
 ```powershell
 python tools/package-rust.py --output dist/release --proxy-runtime C:/path/to/mitmproxy-runtime --solid-payload build/cpv-payload.xz
-.\tools\build-rust.ps1 -Payload build/cpv-payload.xz -PayloadManifest dist/release/CPV_2.0.2/manifest.json
+.\tools\build-rust.ps1 -Payload build/cpv-payload.xz -PayloadManifest dist/release/CPV_2.0.3/manifest.json
 ```
 
 The launcher is written to `backend/target/release/cpv-launcher.exe`; copy and rename it to `自定义星球和变种.exe`. Python runtimes and generated binaries are not committed. Packaging verifies runtime hashes and required icon glyphs. If it detects missing glyphs, run `flutter clean` and rebuild.

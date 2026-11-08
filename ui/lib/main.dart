@@ -695,6 +695,17 @@ class _CpvAppState extends State<CpvApp>
                     },
                   ),
                 ),
+                if (widget.nativeWindow && Platform.isWindows)
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: MediaQuery.sizeOf(context).width >= 960 ? 22 : 12,
+                    child: windowDrag(
+                      const SizedBox.expand(),
+                      key: const ValueKey('window-top-drag-zone'),
+                    ),
+                  ),
               ],
             ),
           ),
@@ -706,10 +717,32 @@ class _CpvAppState extends State<CpvApp>
   Widget sidebar(bool wide) {
     final labels = [
       t('星球方案', 'Planet plans'),
-      t('效果目录', 'Effect library'),
-      t('连接', 'Connection'),
-      t('设置', 'Settings'),
+      t('效果列表', 'Effect library'),
+      t('连接游戏', 'Connect game'),
+      t('软件设置', 'App settings'),
       t('军械库', 'Armory'),
+    ];
+    final hints = [
+      t(
+        '选择星球，设置敌人、作战和附加效果。',
+        'Choose a planet, its enemies, operations and effects.',
+      ),
+      t(
+        '查找变种、天气、临时战备等效果，点击条目查看说明。',
+        'Browse variants, weather and temporary stratagems. Open an entry for details.',
+      ),
+      t(
+        '完成首次连接设置，启动代理并从 Steam 进入游戏。',
+        'Set up the connection, start the proxy and launch the game through Steam.',
+      ),
+      t(
+        '调整外观和语言，检查更新或导出问题日志。',
+        'Change appearance and language, check updates or export troubleshooting logs.',
+      ),
+      t(
+        '选择要在游戏中预览的武器和投掷物，设置配件替换。',
+        'Choose weapons and throwables to preview, or replace attachments.',
+      ),
     ];
     final icons = [
       Icons.dashboard_outlined,
@@ -722,22 +755,30 @@ class _CpvAppState extends State<CpvApp>
       Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              Image.asset('assets/cpv.png', width: wide ? 42 : 36, height: 42),
-              if (wide) ...[
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    title,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w700,
+          windowDrag(
+            Row(
+              children: [
+                Image.asset(
+                  'assets/cpv.png',
+                  width: wide ? 42 : 36,
+                  height: 42,
+                ),
+                if (wide) ...[
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w700,
+                      ),
                     ),
                   ),
-                ),
+                ],
               ],
-            ],
+            ),
+            height: 42,
+            key: const ValueKey('window-logo-drag-zone'),
           ),
           if (wide) ...[
             const SizedBox(height: 12),
@@ -753,7 +794,7 @@ class _CpvAppState extends State<CpvApp>
             Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: Tooltip(
-                message: labels[i],
+                message: '${labels[i]}\n${hints[i]}',
                 child: Material(
                   color: page == i
                       ? accent.withValues(alpha: .17)
@@ -837,44 +878,48 @@ class _CpvAppState extends State<CpvApp>
       Expanded(
         child: windowDrag(
           Text(
-            '${t('工作台', 'Workspace')}  /  ${[t('星球方案', 'Planet plans'), t('效果目录', 'Effect library'), t('连接', 'Connection'), t('设置', 'Settings'), t('军械库', 'Armory')][page]}',
+            '${t('工作台', 'Workspace')}  /  ${[t('星球方案', 'Planet plans'), t('效果列表', 'Effect library'), t('连接游戏', 'Connect game'), t('软件设置', 'App settings'), t('军械库', 'Armory')][page]}',
             style: const TextStyle(fontSize: 13),
           ),
+          key: const ValueKey('window-header-drag-zone'),
         ),
       ),
-      Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: (state['ready'] == true ? Colors.green : accent).withValues(
-            alpha: .12,
-          ),
-          borderRadius: BorderRadius.circular(30),
-        ),
-        child: Row(
-          children: [
-            if (working || state['preparing'] == true)
-              const SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              )
-            else
-              Icon(
-                Icons.circle,
-                size: 8,
-                color: state['ready'] == true ? Colors.green : accent,
-              ),
-            const SizedBox(width: 8),
-            Text(
-              state['ready'] == true
-                  ? t('代理就绪', 'Proxy ready')
-                  : state['active'] == true
-                  ? t('连接中', 'Connecting')
-                  : t('未开启代理', 'Proxy off'),
-              style: const TextStyle(fontSize: 12),
+      windowDrag(
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          decoration: BoxDecoration(
+            color: (state['ready'] == true ? Colors.green : accent).withValues(
+              alpha: .12,
             ),
-          ],
+            borderRadius: BorderRadius.circular(30),
+          ),
+          child: Row(
+            children: [
+              if (working || state['preparing'] == true)
+                const SizedBox(
+                  width: 12,
+                  height: 12,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                Icon(
+                  Icons.circle,
+                  size: 8,
+                  color: state['ready'] == true ? Colors.green : accent,
+                ),
+              const SizedBox(width: 8),
+              Text(
+                state['ready'] == true
+                    ? t('代理就绪', 'Proxy ready')
+                    : state['active'] == true
+                    ? t('连接中', 'Connecting')
+                    : t('未开启代理', 'Proxy off'),
+                style: const TextStyle(fontSize: 12),
+              ),
+            ],
+          ),
         ),
+        key: const ValueKey('window-status-drag-zone'),
       ),
       if (widget.nativeWindow && Platform.isWindows) ...[
         const SizedBox(width: 12),
@@ -899,10 +944,12 @@ class _CpvAppState extends State<CpvApp>
       ],
     ],
   );
-  Widget windowDrag(Widget child) => widget.nativeWindow && Platform.isWindows
+  Widget windowDrag(Widget child, {Key? key, double height = 36}) =>
+      widget.nativeWindow && Platform.isWindows
       ? DragToMoveArea(
+          key: key,
           child: SizedBox(
-            height: 36,
+            height: height,
             child: Align(alignment: Alignment.centerLeft, child: child),
           ),
         )
@@ -1051,9 +1098,14 @@ class _CpvAppState extends State<CpvApp>
                 return found.isEmpty ? '#$id' : recordName(found.first, en);
               })
               .join(' · ');
-    final operation = target['campaign'] == true
-        ? t('自定义作战', 'Custom operations')
-        : t('原始作战', 'Original operations');
+    final operation = target['campaign'] == true || target['force_open'] == true
+        ? switch (target['campaign_type'] ?? 0) {
+            0 => t('普通作战', 'Standard operations'),
+            3 => t('城市作战', 'City operations'),
+            4 => t('防守作战', 'Defense operations'),
+            _ => t('自定义作战', 'Custom operations'),
+          }
+        : t('沿用游戏作战', 'Current game operations');
     return glass(
       Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1177,7 +1229,7 @@ class _CpvAppState extends State<CpvApp>
     selected: const {},
     onToggle: null,
     header: heading(
-      t('效果目录', 'Effect library'),
+      t('效果列表', 'Effect library'),
       t(
         '按类型查找；中英文名称和 ID 都能搜索。',
         'Search by type, Chinese or English name, or ID.',
@@ -1297,16 +1349,11 @@ class _CpvAppState extends State<CpvApp>
             const Divider(height: 34),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: Text(
-                t(
-                  '游戏 API 经现有 HTTP 代理转发',
-                  'Forward game API through the existing HTTP proxy',
-                ),
-              ),
+              title: Text(t('使用电脑已有的代理', 'Use the computer’s existing proxy')),
               subtitle: Text(
                 t(
-                  '仅在停止代理时切换；不会修改系统代理。',
-                  'Change while stopped. System proxy settings remain untouched.',
+                  '通过系统中已配置的 HTTP 代理连接游戏接口。先停止本程序代理再切换。',
+                  'Routes game API requests through the HTTP proxy configured in Windows. Stop this app’s proxy before switching.',
                 ),
               ),
               value: settings['useSystemProxy'] == true,
@@ -1737,8 +1784,8 @@ class _CpvAppState extends State<CpvApp>
             ),
             const Divider(height: 32),
             settingRow(
-              t('强调色', 'Accent color'),
-              t('按钮、选中项与焦点颜色', 'Buttons, selections and focus'),
+              t('主题颜色', 'Theme color'),
+              t('改变按钮和选中项的颜色', 'Changes the color of buttons and selections'),
               Wrap(
                 spacing: 10,
                 children: [
@@ -1818,14 +1865,14 @@ class _CpvAppState extends State<CpvApp>
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              t('玻璃材质', 'Glass material'),
+              t('卡片样式', 'Card style'),
               style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 12),
             Text(
               t(
-                '使用 Morrow 的原生玻璃表面与光学效果。',
-                'Uses Morrow’s glass surface and optical effects.',
+                '选择卡片的背景效果。磨砂会模糊背景，液态玻璃带有折射，实色更清晰。',
+                'Frosted cards blur the background, liquid glass adds refraction, and solid cards improve contrast.',
               ),
             ),
             const SizedBox(height: 20),
@@ -1851,19 +1898,21 @@ class _CpvAppState extends State<CpvApp>
               onSelectionChanged: (v) => setting({'material': v.first}),
             ),
             const SizedBox(height: 24),
-            Text(t('磨砂不透明度', 'Frosted opacity')),
+            Text(t('磨砂卡片遮挡背景的程度', 'Frosted background coverage')),
             Slider(
               value: (settings['opacity'] as num? ?? .76).toDouble(),
               min: .2,
               max: 1,
               divisions: 80,
               label: '${((settings['opacity'] as num? ?? .76) * 100).round()}%',
-              onChanged: (v) => setting({'opacity': v}),
+              onChanged: (settings['material'] ?? 'frosted') == 'frosted'
+                  ? (v) => setting({'opacity': v})
+                  : null,
             ),
             Text(
               t(
-                '低值更通透，高值更容易阅读；液态玻璃使用独立的折射与高光。',
-                'Lower values reveal the background; higher values improve readability. Liquid glass uses its own refraction and rim light.',
+                '向左可看见更多背景，向右文字更清楚。这个滑条用于磨砂样式。',
+                'Move left to reveal the background or right to improve text contrast. Applies to frosted cards.',
               ),
               style: const TextStyle(fontSize: 12),
             ),
@@ -1881,7 +1930,7 @@ class _CpvAppState extends State<CpvApp>
             ),
             const SizedBox(height: 16),
             settingRow(
-              t('诊断模式', 'Diagnostic mode'),
+              t('详细记录问题', 'Record troubleshooting details'),
               t(
                 '记录启动、操作耗时与异常，便于排查卡顿或无法启动。',
                 'Records startup, operation timing and errors for troubleshooting.',
@@ -2721,19 +2770,62 @@ class _PlanetPickerState extends State<PlanetPicker> {
 }
 
 const groups = {
-  'events': ['事件作战', 'Events'],
-  'enemies': ['敌情与变种', 'Enemy variants'],
-  'world': ['环境与通路', 'World & routes'],
-  'facilities': ['设施与星球标记', 'Facilities'],
-  'tactical': ['空间站与战术行动', 'Tactical actions'],
-  'tags': ['配套星图词条', 'Map tags'],
-  'stratagems': ['临时配发战备', 'Temporary stratagems'],
+  'events': ['特殊作战', 'Special operations'],
+  'enemies': ['敌人变种', 'Enemy variants'],
+  'world': ['环境与路线', 'Environment & routes'],
+  'facilities': ['星球设施', 'Planet facilities'],
+  'tactical': ['空间站支援', 'Space station support'],
+  'tags': ['地图标记', 'Map markers'],
+  'stratagems': ['临时战备', 'Temporary stratagems'],
   'equipment': ['临时装备', 'Temporary equipment'],
-  'variants': ['实验性战备变体', 'Experimental variants'],
-  'combat': ['作战增减益', 'Combat modifiers'],
+  'variants': ['特殊战备（实验性）', 'Special stratagems (experimental)'],
+  'combat': ['战斗加成与限制', 'Combat bonuses & limits'],
   'supplies': ['弹药与补给', 'Ammo & supplies'],
   'intel': ['情报与侦察', 'Intel'],
-  'unknown': ['未解效果', 'Unresolved'],
+  'unknown': ['作用待确认', 'Unconfirmed effects'],
+};
+
+const groupHelp = {
+  'events': [
+    '特殊事件和事件作战相关的效果。',
+    'Effects related to special events and operations.',
+  ],
+  'enemies': [
+    '选择酸液、燃烧等敌人变种。',
+    'Choose enemy variants such as acid and incendiary strains.',
+  ],
+  'world': [
+    '星球环境和通行路线相关的效果。',
+    'Effects related to the planet environment and routes.',
+  ],
+  'facilities': [
+    '星球设施和它们在地图上的显示。',
+    'Planet facilities and how they appear on the map.',
+  ],
+  'tactical': [
+    '空间站支援和相关战术行动。',
+    'Space station support and related tactical actions.',
+  ],
+  'tags': ['用于显示或配合敌人变种的地图标记。', 'Map markers displayed with enemy variants.'],
+  'stratagems': [
+    '在星球上临时提供指定战备，游戏内有数量限制。',
+    'Temporarily grants stratagems on the planet. The game limits their number.',
+  ],
+  'equipment': [
+    '在星球上临时提供装备的效果。',
+    'Effects that temporarily provide equipment on the planet.',
+  ],
+  'variants': [
+    '特殊战备的候选效果，游戏内表现需要验证。',
+    'Candidate special stratagem effects that need in-game verification.',
+  ],
+  'combat': ['改变战斗中的加成、限制或惩罚。', 'Changes combat bonuses, limits or penalties.'],
+  'supplies': ['影响弹药和补给的效果。', 'Effects that affect ammunition and supplies.'],
+  'intel': ['影响情报显示和侦察的效果。', 'Effects that affect intelligence and scouting.'],
+  'unknown': [
+    '已发现条目，具体作用还需要确认。',
+    'Discovered entries whose effects need confirmation.',
+  ],
 };
 
 class EffectLibrary extends StatefulWidget {
@@ -2791,14 +2883,19 @@ class _EffectLibraryState extends State<EffectLibrary> {
               for (final key in ['all', ...groups.keys])
                 Padding(
                   padding: const EdgeInsets.only(right: 8),
-                  child: ChoiceChip(
-                    label: Text(
-                      key == 'all'
-                          ? (widget.en ? 'All' : '全部')
-                          : groups[key]![widget.en ? 1 : 0],
+                  child: Tooltip(
+                    message: key == 'all'
+                        ? (widget.en ? 'Browse all effects.' : '显示全部类别的效果。')
+                        : groupHelp[key]![widget.en ? 1 : 0],
+                    child: ChoiceChip(
+                      label: Text(
+                        key == 'all'
+                            ? (widget.en ? 'All' : '全部')
+                            : groups[key]![widget.en ? 1 : 0],
+                      ),
+                      selected: group == key,
+                      onSelected: (_) => setState(() => group = key),
                     ),
-                    selected: group == key,
-                    onSelected: (_) => setState(() => group = key),
                   ),
                 ),
             ],
@@ -2974,7 +3071,10 @@ class _PlanetEditorState extends State<PlanetEditor> {
             child: SegmentedButton<int>(
               segments: [
                 ButtonSegment(value: 0, label: Text(t('效果', 'Effects'))),
-                ButtonSegment(value: 1, label: Text(t('作战与分区', 'Operations'))),
+                ButtonSegment(
+                  value: 1,
+                  label: Text(t('星球设置', 'Planet settings')),
+                ),
                 ButtonSegment(value: 2, label: Text(t('天气', 'Weather'))),
               ],
               selected: {tab},
@@ -3041,6 +3141,16 @@ class _PlanetEditorState extends State<PlanetEditor> {
                   onPressed: saving
                       ? null
                       : () async {
+                          if (operationMode == 4 &&
+                              (draft['defense_source'] as num? ?? -1) < 0) {
+                            setState(
+                              () => saveError = t(
+                                '请选择发起进攻的星球。',
+                                'Choose the planet launching the attack.',
+                              ),
+                            );
+                            return;
+                          }
                           draft['effects'] = selected.toList();
                           setState(() {
                             saving = true;
@@ -3069,64 +3179,317 @@ class _PlanetEditorState extends State<PlanetEditor> {
     );
   }
 
-  Widget operations() => ListView(
+  int get operationMode {
+    final type = (draft['campaign_type'] as num? ?? 0).toInt();
+    if (draft['campaign'] == true || draft['force_open'] == true || type == 4) {
+      return [0, 3, 4].contains(type) ? type : -2;
+    }
+    return draft['initialize_regions'] == true ||
+            draft['open_regions'] == true ||
+            (draft['owner'] as num? ?? 0) != 0 ||
+            (draft['campaign_race'] as num? ?? 0) != 0
+        ? -2
+        : -1;
+  }
+
+  void selectOperationMode(int value) {
+    setState(() {
+      draft['campaign'] = value != -1;
+      draft['force_open'] = value != -1;
+      draft['campaign_type'] = value == -1 ? 0 : value;
+      draft['initialize_regions'] = false;
+      draft['open_regions'] = value == 3;
+      draft['campaign_count'] ??= 20;
+      final race = (draft['campaign_race'] as num? ?? 0).toInt();
+      draft['campaign_race'] = value == -1 || race < 2 ? 0 : race;
+      draft['owner'] = draft['campaign_race'];
+      if (value == 4) {
+        draft['owner'] = 1;
+        final enemies = widget.planets.where(
+          (p) => p['id'] != draft['planet'] && [2, 3, 4].contains(p['owner']),
+        );
+        draft['campaign_race'] = race >= 2
+            ? race
+            : enemies.isEmpty
+            ? 2
+            : enemies.first['owner'];
+        selectDefenseSource();
+      }
+    });
+  }
+
+  void selectDefenseSource() {
+    final candidates = widget.planets.where(
+      (p) => p['id'] != draft['planet'] && p['owner'] == draft['campaign_race'],
+    );
+    if (!candidates.any((p) => p['id'] == draft['defense_source'])) {
+      draft['defense_source'] = candidates.isEmpty
+          ? -1
+          : candidates.first['id'];
+    }
+  }
+
+  Widget operations() {
+    final mode = operationMode;
+    final race = (draft['campaign_race'] as num? ?? 0).toInt();
+    final source = widget.planets.where(
+      (p) => p['id'] == draft['defense_source'],
+    );
+    final sourceName = source.isNotEmpty
+        ? recordName(source.first, widget.en)
+        : (draft['defense_source'] as num? ?? -1) >= 0
+        ? '#${draft['defense_source']}'
+        : t('选择星球', 'Choose a planet');
+    return ListView(
+      key: const PageStorageKey('planet-operations'),
+      children: [
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: Text(t('启用方案', 'Enable plan')),
+          subtitle: Text(
+            t(
+              '开启后应用这颗星球的作战和效果设置。关闭后暂停应用，已保存的设置会保留。',
+              'Applies this planet’s operations and effects. Turn off to pause the plan while keeping its saved settings.',
+            ),
+          ),
+          value: draft['enabled'] == true,
+          onChanged: (v) => setState(() => draft['enabled'] = v),
+        ),
+        const SizedBox(height: 20),
+        Text(
+          t('作战类型', 'Operation type'),
+          style: Theme.of(context).textTheme.titleSmall,
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final item in [
+              (-1, t('保持原样', 'Keep as is')),
+              (0, t('普通作战', 'Standard operations')),
+              (3, t('城市作战', 'City operations')),
+              (4, t('防守作战（实验性）', 'Defense operations (experimental)')),
+              if (mode == -2) (-2, t('保留已有设置', 'Keep saved settings')),
+            ])
+              ChoiceChip(
+                label: Text(item.$2),
+                selected: mode == item.$1,
+                onSelected: (selected) {
+                  if (selected && item.$1 != -2) selectOperationMode(item.$1);
+                },
+              ),
+          ],
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 8, bottom: 20),
+          child: Text(switch (mode) {
+            -1 => t(
+              '不改变游戏原本的作战安排。',
+              'Leaves the game’s original operations unchanged.',
+            ),
+            3 => t(
+              '尝试添加城市作战，并自动准备所需区域。没有可用城市区域时改用普通作战。',
+              'Tries to add city operations and prepares the required areas. Uses standard operations if no city areas are available.',
+            ),
+            4 => t(
+              '守卫这颗星球。选择敌人及其出发星球，其余选项通常不用改。此功能仍在验证中。',
+              'Defend this planet. Choose the enemy and its source planet; other options usually need no changes. This feature is still being verified.',
+            ),
+            -2 => t(
+              '保留原方案的设置。需要调整时展开“更多设置”。',
+              'Keeps your saved settings. Open More settings to adjust them.',
+            ),
+            _ => t(
+              '尝试让这颗星球可以游玩，自动添加作战并准备可用区域。一般选择这一项即可。',
+              'Tries to make the planet playable by adding operations and preparing available areas. This is the usual choice.',
+            ),
+          }, style: Theme.of(context).textTheme.bodySmall),
+        ),
+        if (mode != -1) ...[
+          Text(t('敌人', 'Enemy'), style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (final item in [
+                if (mode != 4 || race == 0) (0, t('自动选择', 'Automatic')),
+                if (race == 1) (1, t('沿用旧设置', 'Keep legacy setting')),
+                (2, t('终结族', 'Terminids')),
+                (3, t('机器人', 'Automatons')),
+                (4, t('光能族', 'Illuminate')),
+              ])
+                ChoiceChip(
+                  label: Text(item.$2),
+                  selected: race == item.$1,
+                  onSelected: (selected) {
+                    if (!selected) return;
+                    setState(() {
+                      draft['campaign_race'] = item.$1;
+                      if (item.$1 < 2) draft['initialize_regions'] = false;
+                      if (mode == 4) {
+                        draft['owner'] = 1;
+                        selectDefenseSource();
+                      } else if (draft['force_open'] == true) {
+                        draft['owner'] = item.$1;
+                      }
+                    });
+                  },
+                ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(
+              race == 0
+                  ? t(
+                      '自动选择会沿用星球上的敌人；无法识别时使用终结族。',
+                      'Automatic keeps the planet’s enemy, using Terminids if it cannot be identified.',
+                    )
+                  : t(
+                      '设置这颗星球的作战中出现哪一方敌人。',
+                      'Chooses the enemy faction for this planet’s operations.',
+                    ),
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+        ],
+        if (mode == 4) ...[
+          const SizedBox(height: 16),
+          OutlinedButton.icon(
+            onPressed: () async {
+              final chosen = await showDialog<Json>(
+                context: context,
+                builder: (context) => PlanetPicker(
+                  planets: widget.planets
+                      .where((p) => p['id'] != draft['planet'])
+                      .toList(),
+                  en: widget.en,
+                ),
+              );
+              if (chosen != null && mounted) {
+                setState(() => draft['defense_source'] = chosen['id']);
+              }
+            },
+            icon: const Icon(Icons.public),
+            label: Text('${t('敌人从哪来', 'Enemy source planet')} · $sourceName'),
+          ),
+          Text(
+            t(
+              '敌人从这颗星球发起进攻。请选择由上方所选敌人控制的星球。',
+              'The enemy attacks from this planet. Choose a planet controlled by the enemy selected above.',
+            ),
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+        const SizedBox(height: 20),
+        advancedOperations(),
+        const SizedBox(height: 24),
+        Text(
+          t(
+            '点击“保存方案”后生效。如果地图没有变化，请退出星图再打开，等待战况刷新。',
+            'Save the plan to apply it. If the map does not change, close and reopen it and wait for war status to refresh.',
+          ),
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const SizedBox(height: 24),
+      ],
+    );
+  }
+
+  Widget advancedOperations() => ExpansionTile(
+    key: const PageStorageKey('planet-advanced-settings'),
+    title: Text(t('更多设置', 'More settings')),
+    subtitle: Text(
+      t(
+        '一般不用改；没有作战时可在这里调整',
+        'Usually unchanged; adjust here if operations are missing',
+      ),
+    ),
+    tilePadding: EdgeInsets.zero,
     children: [
       SwitchListTile(
-        title: Text(t('强制开放星球', 'Force planet open')),
+        title: Text(t('开放星球', 'Open planet')),
         subtitle: Text(
           t(
-            '为当前战况中的星球生成作战。无法判断敌人时使用终结族，城市分区不可用时改用常规解放。',
-            'Creates operations for a planet in the current status. Uses Terminids when no enemy is known and standard liberation when city regions are unavailable.',
+            '开启后，尝试让没有作战的星球可以游玩，并自动添加作战。选择普通或城市作战时已自动开启。',
+            'Tries to make a planet with no operations playable and adds operations automatically. Already enabled for standard and city operations.',
           ),
         ),
         value: draft['force_open'] == true,
         onChanged: (v) => setState(() => draft['force_open'] = v),
       ),
-      SwitchListTile(
-        title: Text(t('启用此方案', 'Enable this plan')),
-        value: draft['enabled'] == true,
-        onChanged: (v) => setState(() => draft['enabled'] = v),
+      select(
+        'owner',
+        t('谁控制星球', 'Who controls the planet'),
+        [
+          t('保留原样', 'Unchanged'),
+          t('超级地球', 'Super Earth'),
+          t('终结族', 'Terminids'),
+          t('机器人', 'Automatons'),
+          t('光能族', 'Illuminate'),
+        ],
+        hint: t(
+          '选择超级地球或敌人控制这颗星球。“保留原样”不修改控制方。',
+          'Choose Super Earth or an enemy to control the planet. Unchanged keeps its current owner.',
+        ),
       ),
-      select('owner', t('星球归属', 'Planet owner'), [
-        t('保留原样', 'Unchanged'),
-        t('超级地球', 'Super Earth'),
-        t('终结族', 'Terminids'),
-        t('机器人', 'Automatons'),
-        t('光能族', 'Illuminate'),
-      ]),
       const SizedBox(height: 16),
       SwitchListTile(
-        title: Text(t('补齐可选作战', 'Populate operations')),
+        title: Text(t('添加作战', 'Add operations')),
         subtitle: Text(
-          t(
-            '修改后需让游戏重新获取战况。',
-            'The game must refresh war status after changes.',
-          ),
+          draft['force_open'] == true
+              ? t(
+                  '已随“开放星球”开启。要单独关闭，请先关闭“开放星球”。',
+                  'Enabled by Open planet. Turn that off first to disable this separately.',
+                )
+              : draft['campaign_type'] == 4
+              ? t('防守作战需要开启此项。', 'Required for defense operations.')
+              : t(
+                  '开启后，星球没有作战时尝试添加作战入口。关闭后不再添加。',
+                  'Adds an operation entry if the planet has none. Turn off to stop adding it.',
+                ),
         ),
         value: draft['campaign'] == true || draft['force_open'] == true,
-        onChanged: draft['force_open'] == true
+        onChanged: draft['force_open'] == true || draft['campaign_type'] == 4
             ? null
-            : (v) => setState(() => draft['campaign'] = v),
+            : (v) => setState(() {
+                draft['campaign'] = v;
+                if (!v) draft['initialize_regions'] = false;
+              }),
       ),
-      select('campaign_type', t('战役类型', 'Campaign type'), [
-        t('常规解放', 'Standard liberation'),
-        t('侦察战役', 'Recon campaign'),
-        t('高优先级战役', 'High-priority campaign'),
-        t('超级地球保卫战形态', 'Super Earth defense form'),
-        t('防守（实验性）', 'Defense (experimental)'),
-      ]),
+      select(
+        'campaign_type',
+        t('特殊作战', 'Special operations'),
+        [
+          t('普通解放', 'Standard liberation'),
+          t('侦察战役', 'Recon campaign'),
+          t('高优先级战役', 'High-priority campaign'),
+          t('城市作战', 'City operations'),
+          t('防守（实验性）', 'Defense (experimental)'),
+        ],
+        hint: t(
+          '需要侦察或高优先级作战时再改。不确定时选普通解放。',
+          'Change only if you want recon or high-priority operations. Otherwise use standard liberation.',
+        ),
+      ),
       if (draft['campaign'] == true || draft['force_open'] == true)
         Padding(
           padding: const EdgeInsets.only(top: 16),
           child: TextFormField(
+            // Text fields have an internal scroll position. Keep it separate
+            // from the ExpansionTile's boolean state in PageStorage.
+            key: const PageStorageKey('planet-operation-count'),
             initialValue: '${draft['campaign_count'] ?? 20}',
             keyboardType: TextInputType.number,
             decoration: InputDecoration(
-              labelText: t('作战数量', 'Operation count'),
+              labelText: t('可选作战数', 'Operation count'),
               helperText: t(
-                '城市与特殊星球战役需要足够的作战槽；默认 20。',
-                'City and special-planet campaigns need enough operation slots; default 20.',
+                '默认 20。决定地图上预留多少个作战位置。',
+                'Default 20. Sets how many operation slots are reserved on the map.',
               ),
+              helperMaxLines: 3,
             ),
             onChanged: (v) {
               final n = int.tryParse(v);
@@ -3135,63 +3498,76 @@ class _PlanetEditorState extends State<PlanetEditor> {
           ),
         ),
       const SizedBox(height: 16),
-      select('campaign_race', t('作战敌人', 'Enemy faction'), [
-        t('保留原样', 'Unchanged'),
-        t('超级地球（不可用于初始化）', 'Super Earth (not for initialization)'),
-        t('终结族', 'Terminids'),
-        t('机器人', 'Automatons'),
-        t('光能族', 'Illuminate'),
-      ]),
-      const SizedBox(height: 16),
       SwitchListTile(
-        title: Text(t('开放分区', 'Open regions')),
+        title: Text(t('开放区域', 'Open areas')),
+        subtitle: Text(
+          t(
+            '开启后，让地图上已有、且未被摧毁的区域可以选择。不会添加新区域。',
+            'Makes existing, undestroyed areas selectable. Does not add new areas.',
+          ),
+        ),
         value: draft['open_regions'] == true,
         onChanged: (v) => setState(() => draft['open_regions'] = v),
       ),
       SwitchListTile(
-        title: Text(t('初始化缺失分区', 'Initialize missing regions')),
+        title: Text(t('补齐区域', 'Add missing areas')),
         subtitle: Text(
           t(
-            '需要启用作战，并明确选择敌人阵营。',
-            'Requires operations and an explicit enemy faction.',
+            '开启后，按游戏资料补回地图缺少的区域。需先开启“添加作战”，并手动选择一种敌人。',
+            'Restores missing map areas from game data. Enable Add operations and choose a specific enemy first.',
           ),
         ),
         value: draft['initialize_regions'] == true,
-        onChanged: (v) => setState(() => draft['initialize_regions'] = v),
+        onChanged:
+            (draft['campaign_race'] as num? ?? 0) >= 2 &&
+                (draft['campaign'] == true || draft['force_open'] == true)
+            ? (v) => setState(() => draft['initialize_regions'] = v)
+            : null,
       ),
       if (draft['campaign_type'] == 4) ...[
         const Divider(height: 28),
         Text(
-          t('防守参数', 'Defense settings'),
+          t('防守设置', 'Defense settings'),
           style: Theme.of(context).textTheme.titleMedium,
         ),
         const SizedBox(height: 16),
-        OutlinedButton(
-          onPressed: () async {
-            final source = await showDialog<Json>(
-              context: context,
-              builder: (context) =>
-                  PlanetPicker(planets: widget.planets, en: widget.en),
-            );
-            if (source != null) {
-              setState(() => draft['defense_source'] = source['id']);
-            }
-          },
-          child: Text(
-            '${t('进攻来源', 'Source planet')}: ${draft['defense_source']}',
-          ),
-        ),
         for (final field in [
-          ('defense_level', t('战役等级', 'Campaign level')),
-          ('defense_hours', t('持续小时数', 'Duration (hours)')),
-          ('defense_count', t('作战数量', 'Operation count')),
+          (
+            'defense_level',
+            t('防守强度', 'Defense strength'),
+            20,
+            t(
+              '通过调整星球总生命值，改变完成防守所需的总进度。数值越大，需要的进度越多。',
+              'Changes the planet’s total defense health. Higher values require more overall progress to finish the defense.',
+            ),
+          ),
+          (
+            'defense_hours',
+            t('防守时长（小时）', 'Defense time (hours)'),
+            48,
+            t('这场星球防守持续多长时间。', 'How long the planet defense lasts.'),
+          ),
+          (
+            'defense_count',
+            t('防守作战数', 'Defense operation count'),
+            38,
+            t(
+              '这场防守可提供的作战数量。',
+              'Number of operations available during the defense.',
+            ),
+          ),
         ])
           Padding(
             padding: const EdgeInsets.only(top: 16),
             child: TextFormField(
-              initialValue: '${draft[field.$1]}',
+              key: PageStorageKey('planet-${field.$1}'),
+              initialValue: '${draft[field.$1] ?? field.$3}',
               keyboardType: TextInputType.number,
-              decoration: InputDecoration(labelText: field.$2),
+              decoration: InputDecoration(
+                labelText: field.$2,
+                helperText: field.$4,
+                helperMaxLines: 3,
+              ),
               onChanged: (v) {
                 final n = int.tryParse(v);
                 if (n != null) draft[field.$1] = n;
@@ -3202,21 +3578,37 @@ class _PlanetEditorState extends State<PlanetEditor> {
       const SizedBox(height: 24),
     ],
   );
-  Widget select(String key, String label, List<String> labels) =>
-      DropdownButtonFormField<int>(
-        initialValue: (draft[key] as num? ?? 0).toInt(),
-        decoration: InputDecoration(labelText: label),
-        isExpanded: true,
-        menuMaxHeight: 320,
-        items: [
-          for (int i = 0; i < labels.length; i++)
-            DropdownMenuItem(
-              value: i,
-              child: Text(labels[i], overflow: TextOverflow.ellipsis),
-            ),
-        ],
-        onChanged: (v) => setState(() => draft[key] = v),
-      );
+  Widget select(
+    String key,
+    String label,
+    List<String> labels, {
+    String? hint,
+  }) => DropdownButtonFormField<int>(
+    key: ValueKey('$key-${draft[key]}'),
+    initialValue: (draft[key] as num? ?? 0).toInt(),
+    decoration: InputDecoration(
+      labelText: label,
+      helperText: hint,
+      helperMaxLines: 3,
+    ),
+    isExpanded: true,
+    menuMaxHeight: 320,
+    items: [
+      for (int i = 0; i < labels.length; i++)
+        DropdownMenuItem(
+          value: i,
+          child: Text(labels[i], overflow: TextOverflow.ellipsis),
+        ),
+    ],
+    onChanged: (v) {
+      if (v == null) return;
+      if (key == 'campaign_type') {
+        selectOperationMode(v);
+      } else {
+        setState(() => draft[key] = v);
+      }
+    },
+  );
   Widget weather() {
     final current = selected.intersection({1373, 1374, 1375});
     final value = current.isEmpty ? 0 : current.first;

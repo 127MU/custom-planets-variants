@@ -450,6 +450,15 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    // Image decoding can complete after pumpAndSettle in a cold test process.
+    // Wait for the logo before capturing the preview in both isolated and full runs.
+    await tester.runAsync(
+      () => precacheImage(
+        const AssetImage('assets/cpv.png'),
+        tester.element(find.byType(Image).first),
+      ),
+    );
+    await tester.pumpAndSettle();
     expect(
       (tester.widget<GridView>(find.byType(GridView)).gridDelegate
               as SliverGridDelegateWithFixedCrossAxisCount)
