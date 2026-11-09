@@ -16,7 +16,7 @@ WAR_INFO = re.compile(r"^/api/WarSeason/[0-9]+/WarInfo$")
 INVENTORY = "/api/Progression/inventory"
 ITEM_CATALOG = "/api/Progression/items"
 ARMORY_ENDPOINTS = {INVENTORY.lower(): "inventory", ITEM_CATALOG.lower(): "item_catalog"}
-STRATAGEM_LICENSE_CATEGORY = 11
+PREVIEW_CATEGORIES = frozenset((0, 2, 3, 4, 5, 7, 8, 9, 23))
 WEAPON_TEMPLATES = {0x7DE53646: 0xE673DCC8, 0x7349AF9A: 0x7C816371, 0xC9F609BA: 0xA7977F98}
 DEFAULT_WEAPON_TEMPLATES = {"primary": 0xAA035309, "secondary": 0xA7977F98, "throwable": 0xBE376EA8}
 MAX_BODY = 8 * 1024 * 1024
@@ -79,18 +79,29 @@ def rewrite_weapon_catalog(document, plan, weapons):
     return ([*document, *added] if added else document), missing
 
 
-def stratagem_licenses(document):
-    """Return only license IDs advertised by the original item catalog."""
-    if not isinstance(document, list) or not all(isinstance(row, dict) for row in document):
-        return ()
-    return tuple(sorted({
-        row["mixId"] for row in document
-        if row.get("progressionCategory") == STRATAGEM_LICENSE_CATEGORY
-        and type(row.get("mixId")) is int and 0 < row["mixId"] <= 0xFFFFFFFF
-    }))
+def item_id(value):
+    return type(value) is int and 0 < value <= 0xFFFFFFFF
 
 
-def rewrite_inventory(document, plan, weapon_ids=(), stratagem_ids=()):
+def progression_ids(rows):
+    """Index original catalog mix IDs, grouping attachment licenses by parent weapon."""
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise InventorySchemaError()
+    items, attachments = {}, {}
+    for row in rows:
+        category, mix_id = row.get("progressionCategory"), row.get("mixId")
+        if type(category) is not int or not item_id(mix_id):
+            continue
+        if category == 2:
+            parent = row.get("parentId")
+            if item_id(parent):
+                attachments.setdefault(str(parent), []).append(mix_id)
+        elif category in PREVIEW_CATEGORIES or category in (1, 11):
+            items.setdefault(str(category), []).append(mix_id)
+    return items, attachments
+
+
+def rewrite_inventory(document, plan, weapon_ids=(), item_ids=None, attachment_ids=None):
     """Apply a local preview without changing requests or upstream state."""
     def uint(value):
         return type(value) is int and 0 <= value <= 0xFFFFFFFF
@@ -102,6 +113,14 @@ def rewrite_inventory(document, plan, weapon_ids=(), stratagem_ids=()):
     unlock_all = plan.get("unlockAllWeapons", False)
     unlock_stratagems = plan.get("unlockAllStratagems", False)
     if type(unlock_all) is not bool or type(unlock_stratagems) is not bool:
+        return document
+    categories = plan.get("previewCategories", [])
+    attachment_weapons = plan.get("attachmentUnlockWeapons", [])
+    if not isinstance(categories, list) or len(categories) > len(PREVIEW_CATEGORIES) or not all(
+            type(category) is int and category in PREVIEW_CATEGORIES for category in categories):
+        return document
+    if not isinstance(attachment_weapons, list) or len(attachment_weapons) > 128 or not all(
+            map(item_id, attachment_weapons)):
         return document
     items, customized = document.get("items"), document.get("customization")
     added, overrides = (plan.get(key) for key in ("items", "customization"))
@@ -137,11 +156,20 @@ def rewrite_inventory(document, plan, weapon_ids=(), stratagem_ids=()):
         if mix_id not in owned:
             result_items.append({key: row[key] for key in ("mixId", "amount", "isDiscovered")})
             owned.add(mix_id)
-    for active, ids in ((unlock_all, weapon_ids), (unlock_stratagems, stratagem_ids)):
-        if not active:
-            continue
+    item_ids = item_ids or {}
+    attachment_ids = attachment_ids or {}
+    bulk = [item_ids.get(str(category), ()) for category in categories if category != 2]
+    if unlock_all:
+        bulk.extend((weapon_ids, item_ids.get("1", ())))
+    if unlock_stratagems:
+        bulk.append(item_ids.get("11", ()))
+    if 2 in categories:
+        bulk.extend(attachment_ids.values())
+    else:
+        bulk.extend(attachment_ids.get(str(weapon), ()) for weapon in attachment_weapons)
+    for ids in bulk:
         for mix_id in ids:
-            if uint(mix_id) and mix_id and mix_id not in owned:
+            if item_id(mix_id) and mix_id not in owned:
                 result_items.append({"mixId": mix_id, "amount": 1, "isDiscovered": False})
                 owned.add(mix_id)
     if not overrides and not swaps:
@@ -721,7 +749,8 @@ class WarStatusAddon:
     def __init__(self):
         self.plan = None
         self.armory_weapons = {}
-        self.armory_stratagems = ()
+        self.armory_item_ids = {}
+        self.armory_attachment_ids = {}
         self.inventory = {"responses": 0, "status": "waiting", "http_status": 0, "added": 0}
         self.item_catalog = {**self.inventory, "missing_templates": 0}
         self.allowed = None
@@ -765,7 +794,8 @@ class WarStatusAddon:
         self.plan_path = Path(os.environ["CPV_WAR_PLAN"])
         self.armory_weapons = {item_id: (kind, model) for item_id, kind, model in
                                json.loads(os.environ.get("CPV_ARMORY_WEAPON_CATALOG", "[]"))}
-        self.armory_stratagems = tuple(json.loads(os.environ.get("CPV_ARMORY_STRATAGEM_LICENSES", "[]")))
+        self.armory_item_ids = json.loads(os.environ.get("CPV_ARMORY_ITEM_IDS", "{}"))
+        self.armory_attachment_ids = json.loads(os.environ.get("CPV_ARMORY_ATTACHMENT_IDS", "{}"))
         self.plan = json.loads(self.plan_path.read_text(encoding="utf-8"))
         self.plan_digest = hashlib.sha256(self.plan_path.read_bytes()).hexdigest()
         normalize_targets(self.plan)
@@ -996,18 +1026,24 @@ class WarStatusAddon:
                 return "unsupported_response"
             original = json.loads(raw)
             if endpoint == "item_catalog":
-                current_licenses = stratagem_licenses(original)
-                if current_licenses:
-                    self.armory_stratagems = current_licenses
-                changed, report["missing_templates"] = rewrite_weapon_catalog(original, plan, self.armory_weapons)
+                rows = original.get("items") if isinstance(original, dict) else original
+                items, attachments = progression_ids(rows)
+                if items or attachments:
+                    self.armory_item_ids = items
+                    self.armory_attachment_ids = attachments
+                changed_rows, report["missing_templates"] = rewrite_weapon_catalog(rows, plan, self.armory_weapons)
+                if changed_rows is rows:
+                    return "missing_template" if report["missing_templates"] else "unchanged"
+                changed = {**original, "items": changed_rows} if isinstance(original, dict) else changed_rows
+                added = len(changed_rows) - len(rows)
             else:
-                changed = rewrite_inventory(original, plan, self.armory_weapons, self.armory_stratagems)
+                changed = rewrite_inventory(original, plan, self.armory_weapons,
+                                            self.armory_item_ids, self.armory_attachment_ids)
+                added = len(changed["items"]) - len(original["items"]) if changed is not original else 0
         except (ValueError, TypeError):
             return "unsupported_response"
         if changed is original:
             return "missing_template" if report.get("missing_templates") else "unchanged"
-        added = (len(changed) - len(original) if endpoint == "item_catalog"
-                 else len(changed["items"]) - len(original["items"]))
         response.content = json.dumps(changed, separators=(",", ":")).encode("utf-8")
         for name in ("etag", "last-modified", "content-md5", "digest"):
             response.headers.pop(name, None)

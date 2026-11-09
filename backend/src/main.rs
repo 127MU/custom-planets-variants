@@ -44,6 +44,19 @@ fn validate_inventory_preview(plan: &Value) -> Result<()> {
     if let Some(value) = plan.get("unlockAllStratagems") {
         ensure!(value.is_boolean(), "Invalid unlock-all-stratagems switch");
     }
+    if let Some(categories) = plan.get("previewCategories") {
+        let rows = records(categories, "previewCategories")?;
+        ensure!(
+            rows.len() <= 9 && rows.iter().all(|row|
+                matches!(row.as_u64(), Some(0 | 2 | 3 | 4 | 5 | 7 | 8 | 9 | 23))),
+            "Invalid armory preview category"
+        );
+    }
+    if let Some(weapons) = plan.get("attachmentUnlockWeapons") {
+        for weapon in records(weapons, "attachmentUnlockWeapons")? {
+            ensure!(id(weapon)? != 0, "Invalid attachment weapon mix ID");
+        }
+    }
     for row in records(&plan["items"], "items")? {
         ensure!(id(&row["mixId"])? != 0, "Invalid item mix ID");
         ensure!(
@@ -330,12 +343,21 @@ impl Host {
             let licenses = catalog["stratagemLicenses"]
                 .as_array()
                 .context("Missing stratagem licenses")?;
+            let mut item_ids = catalog["progressionItemIds"]
+                .as_object()
+                .context("Missing progression catalog")?
+                .clone();
+            item_ids.insert("11".into(), json!(licenses));
+            let attachments = catalog["attachmentUnlockIds"]
+                .as_object()
+                .context("Missing attachment unlock catalog")?;
             c.env("CPV_WAR_MITM_PORT", port.to_string())
                 .env(
                     "CPV_ARMORY_WEAPON_CATALOG",
                     serde_json::to_string(&armory_weapon_catalog(&catalog)?)?,
                 )
-                .env("CPV_ARMORY_STRATAGEM_LICENSES", serde_json::to_string(licenses)?);
+                .env("CPV_ARMORY_ITEM_IDS", serde_json::to_string(&item_ids)?)
+                .env("CPV_ARMORY_ATTACHMENT_IDS", serde_json::to_string(attachments)?);
         }
         let mut child = platform::hidden(&mut c).spawn()?;
         let job = match platform::Job::new(&child) {

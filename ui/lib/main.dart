@@ -2085,6 +2085,9 @@ class _InventoryPageState extends State<_InventoryPage> {
   final customization = TextEditingController();
   List<Json> weapons = [], attachments = [], attachmentChanges = [];
   List<Json> stratagems = [];
+  Set<int> previewCategories = {};
+  Set<int> attachmentUnlockWeapons = {};
+  Set<int> weaponsWithAttachmentLicenses = {};
   bool enabled = false, busy = true, loaded = false;
   bool unlockAllWeapons = false;
   bool unlockAllStratagems = false;
@@ -2115,6 +2118,17 @@ class _InventoryPageState extends State<_InventoryPage> {
         weapons = _CpvAppState.rows(catalog['weapons']);
         attachments = _CpvAppState.rows(catalog['attachments']);
         stratagems = _CpvAppState.rows(catalog['stratagems']);
+        previewCategories = (plan['previewCategories'] as List? ?? [])
+            .cast<int>()
+            .toSet();
+        attachmentUnlockWeapons =
+            (plan['attachmentUnlockWeapons'] as List? ?? [])
+                .cast<int>()
+                .toSet();
+        weaponsWithAttachmentLicenses =
+            (catalog['attachmentUnlockIds'] as Map<String, dynamic>).keys
+                .map(int.parse)
+                .toSet();
         attachmentChanges = _CpvAppState.rows(plan['attachmentChanges'] ?? []);
         enabled = plan['enabled'] == true;
         unlockAllWeapons = plan['unlockAllWeapons'] == true;
@@ -2363,6 +2377,25 @@ class _InventoryPageState extends State<_InventoryPage> {
     }
   }
 
+  Future<void> chooseAttachmentWeapons() async {
+    final selection = await pickCatalog(
+      t('选择要解锁配件的武器', 'Choose weapons to unlock attachments for'),
+      weapons
+          .where((item) => weaponsWithAttachmentLicenses.contains(item['id']))
+          .toList(),
+      kind: _ArmoryCatalogKind.weapon,
+      checked: attachmentUnlockWeapons.toSet(),
+    );
+    if (!mounted || selection == null) return;
+    setState(() {
+      attachmentUnlockWeapons = selection
+          .map((row) => row['id'] as int)
+          .toSet();
+      if (attachmentUnlockWeapons.isNotEmpty) enabled = true;
+      message = null;
+    });
+  }
+
   Future<void> addAttachmentChange() async {
     final weapon = await pickOne(
       t('选择要改配件的武器', 'Choose weapon to customize'),
@@ -2518,6 +2551,11 @@ class _InventoryPageState extends State<_InventoryPage> {
               'enabled': enabled,
               'unlockAllWeapons': unlockAllWeapons,
               if (unlockAllStratagems) 'unlockAllStratagems': true,
+              if (previewCategories.isNotEmpty)
+                'previewCategories': previewCategories.toList()..sort(),
+              if (attachmentUnlockWeapons.isNotEmpty)
+                'attachmentUnlockWeapons': attachmentUnlockWeapons.toList()
+                  ..sort(),
               'items': [
                 for (final id in parseIds(add.text))
                   {'mixId': id, 'amount': 1, 'isDiscovered': false},
@@ -2638,6 +2676,60 @@ class _InventoryPageState extends State<_InventoryPage> {
                       ),
                 child: Text(t('浏览战备', 'Browse stratagems')),
               ),
+            ),
+            ExpansionTile(
+              tilePadding: EdgeInsets.zero,
+              title: Text(t('更多解锁选项', 'More unlock options')),
+              children: [
+                for (final (category, zh, en) in const [
+                  (2, '全部武器配件', 'All weapon attachments'),
+                  (3, '商店外观（护甲、头盔和披风）', 'Store armor, helmets and capes'),
+                  (4, '载具涂装', 'Vehicle patterns'),
+                  (5, '强化增益', 'Boosters'),
+                  (7, '动作与表情', 'Emotes'),
+                  (8, '胜利姿势', 'Victory poses'),
+                  (
+                    0,
+                    '战团入口（内容仍需奖章购买）',
+                    'Warbond access (contents still cost medals)',
+                  ),
+                  (9, '横幅（实验性）', 'Banners (experimental)'),
+                  (23, '称号（实验性）', 'Titles (experimental)'),
+                ])
+                  SwitchListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(t(zh, en)),
+                    value: previewCategories.contains(category),
+                    onChanged: busy || !loaded
+                        ? null
+                        : (value) => setState(() {
+                            if (value) {
+                              previewCategories.add(category);
+                              enabled = true;
+                            } else {
+                              previewCategories.remove(category);
+                            }
+                          }),
+                  ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(t('按武器解锁配件', 'Unlock attachments by weapon')),
+                  subtitle: Text(
+                    previewCategories.contains(2)
+                        ? t('已开启全部武器配件。', 'All weapon attachments are enabled.')
+                        : t(
+                            '已选 ${attachmentUnlockWeapons.length} 件武器。仅预览物品目录里已有的配件。',
+                            '${attachmentUnlockWeapons.length} weapons selected. Uses attachments from the item catalog.',
+                          ),
+                  ),
+                  trailing: OutlinedButton(
+                    onPressed: busy || !loaded || previewCategories.contains(2)
+                        ? null
+                        : chooseAttachmentWeapons,
+                    child: Text(t('选择武器', 'Choose weapons')),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 16),
             TextField(
