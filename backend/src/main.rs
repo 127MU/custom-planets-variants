@@ -41,6 +41,9 @@ fn validate_inventory_preview(plan: &Value) -> Result<()> {
     if let Some(value) = plan.get("unlockAllWeapons") {
         ensure!(value.is_boolean(), "Invalid unlock-all-weapons switch");
     }
+    if let Some(value) = plan.get("unlockAllStratagems") {
+        ensure!(value.is_boolean(), "Invalid unlock-all-stratagems switch");
+    }
     for row in records(&plan["items"], "items")? {
         ensure!(id(&row["mixId"])? != 0, "Invalid item mix ID");
         ensure!(
@@ -74,8 +77,7 @@ fn validate_inventory_preview(plan: &Value) -> Result<()> {
     Ok(())
 }
 
-fn armory_weapon_catalog() -> Result<Vec<(u32, String, String)>> {
-    let catalog: Value = serde_json::from_str(include_str!("../../ui/assets/armory_catalog.json"))?;
+fn armory_weapon_catalog(catalog: &Value) -> Result<Vec<(u32, String, String)>> {
     let rows = catalog["weapons"]
         .as_array()
         .context("Missing weapon catalog")?;
@@ -323,10 +325,17 @@ impl Host {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if !prepare {
-            c.env("CPV_WAR_MITM_PORT", port.to_string()).env(
-                "CPV_ARMORY_WEAPON_CATALOG",
-                serde_json::to_string(&armory_weapon_catalog()?)?,
-            );
+            let catalog: Value =
+                serde_json::from_str(include_str!("../../ui/assets/armory_catalog.json"))?;
+            let licenses = catalog["stratagemLicenses"]
+                .as_array()
+                .context("Missing stratagem licenses")?;
+            c.env("CPV_WAR_MITM_PORT", port.to_string())
+                .env(
+                    "CPV_ARMORY_WEAPON_CATALOG",
+                    serde_json::to_string(&armory_weapon_catalog(&catalog)?)?,
+                )
+                .env("CPV_ARMORY_STRATAGEM_LICENSES", serde_json::to_string(licenses)?);
         }
         let mut child = platform::hidden(&mut c).spawn()?;
         let job = match platform::Job::new(&child) {

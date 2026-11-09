@@ -2078,12 +2078,16 @@ class _InventoryPage extends StatefulWidget {
   State<_InventoryPage> createState() => _InventoryPageState();
 }
 
+enum _ArmoryCatalogKind { weapon, attachment, stratagem }
+
 class _InventoryPageState extends State<_InventoryPage> {
   final add = TextEditingController();
   final customization = TextEditingController();
   List<Json> weapons = [], attachments = [], attachmentChanges = [];
+  List<Json> stratagems = [];
   bool enabled = false, busy = true, loaded = false;
   bool unlockAllWeapons = false;
+  bool unlockAllStratagems = false;
   String? message;
   String t(String zh, String en) => widget.english ? en : zh;
 
@@ -2110,9 +2114,11 @@ class _InventoryPageState extends State<_InventoryPage> {
       setState(() {
         weapons = _CpvAppState.rows(catalog['weapons']);
         attachments = _CpvAppState.rows(catalog['attachments']);
+        stratagems = _CpvAppState.rows(catalog['stratagems']);
         attachmentChanges = _CpvAppState.rows(plan['attachmentChanges'] ?? []);
         enabled = plan['enabled'] == true;
         unlockAllWeapons = plan['unlockAllWeapons'] == true;
+        unlockAllStratagems = plan['unlockAllStratagems'] == true;
         loaded = true;
       });
     } catch (_) {
@@ -2182,7 +2188,7 @@ class _InventoryPageState extends State<_InventoryPage> {
   Future<List<Json>?> pickCatalog(
     String title,
     List<Json> rows, {
-    required bool weapon,
+    required _ArmoryCatalogKind kind,
     Set<int>? checked,
   }) async {
     var query = '';
@@ -2192,21 +2198,32 @@ class _InventoryPageState extends State<_InventoryPage> {
         builder: (context, refresh) {
           final filtered = <({Json item, String name, String detail})>[];
           for (final item in rows) {
-            final name = weapon ? weaponName(item) : attachmentName(item);
+            final name = switch (kind) {
+              _ArmoryCatalogKind.weapon => weaponName(item),
+              _ArmoryCatalogKind.attachment => attachmentName(item),
+              _ArmoryCatalogKind.stratagem =>
+                (widget.english ? item['name'] : item['zh'] ?? item['name'])
+                    as String,
+            };
             final id = item['id'] as int;
-            final detail = weapon
-                ? [
-                    weaponKind(item),
-                    if (id != 0) hexId(id) else item['entity'],
-                    if (item['kind'] == 'support')
-                      t('仅查看，需通过战略配备使用', 'Browse only. Use as a stratagem.')
-                    else if (!hasInventoryId(item))
-                      t('仅查看，缺少库存 ID', 'Browse only. No inventory ID.'),
-                  ].join(' · ')
-                : [
-                    hexId(id),
-                    ...(item['slots'] as List).cast<int>().map(slotName),
-                  ].join(' · ');
+            final detail = switch (kind) {
+              _ArmoryCatalogKind.weapon => [
+                weaponKind(item),
+                if (id != 0) hexId(id) else item['entity'],
+                if (item['kind'] == 'support')
+                  t('仅查看，需通过战略配备使用', 'Browse only. Use as a stratagem.')
+                else if (!hasInventoryId(item))
+                  t('仅查看，缺少库存 ID', 'Browse only. No inventory ID.'),
+              ].join(' · '),
+              _ArmoryCatalogKind.attachment => [
+                hexId(id),
+                ...(item['slots'] as List).cast<int>().map(slotName),
+              ].join(' · '),
+              _ArmoryCatalogKind.stratagem => t(
+                '战备数据 ID ${hexId(id)}',
+                'Stratagem data ID ${hexId(id)}',
+              ),
+            };
             final aliases = (item['names'] as List?)?.join(' ') ?? '';
             final searchable =
                 '$name $detail $id ${item['name'] ?? ''} ${item['zh'] ?? ''} $aliases'
@@ -2270,7 +2287,9 @@ class _InventoryPageState extends State<_InventoryPage> {
                               return ListTile(
                                 title: Text(row.name),
                                 subtitle: Text(row.detail),
-                                onTap: () => Navigator.pop(context, [row.item]),
+                                onTap: kind == _ArmoryCatalogKind.stratagem
+                                    ? null
+                                    : () => Navigator.pop(context, [row.item]),
                               );
                             },
                           ),
@@ -2281,7 +2300,11 @@ class _InventoryPageState extends State<_InventoryPage> {
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context),
-                child: Text(t('取消', 'Cancel')),
+                child: Text(
+                  kind == _ArmoryCatalogKind.stratagem
+                      ? t('关闭', 'Close')
+                      : t('取消', 'Cancel'),
+                ),
               ),
               if (checked != null)
                 FilledButton(
@@ -2302,15 +2325,15 @@ class _InventoryPageState extends State<_InventoryPage> {
   Future<Json?> pickOne(
     String title,
     List<Json> rows, {
-    required bool weapon,
-  }) async => (await pickCatalog(title, rows, weapon: weapon))?.single;
+    required _ArmoryCatalogKind kind,
+  }) async => (await pickCatalog(title, rows, kind: kind))?.single;
 
   Future<void> chooseWeapon() async {
     try {
       final selection = await pickCatalog(
         t('选择武器或投掷物', 'Choose weapons or throwables'),
         weapons,
-        weapon: true,
+        kind: _ArmoryCatalogKind.weapon,
         checked: parseIds(add.text).toSet(),
       );
       if (!mounted || selection == null) return;
@@ -2327,7 +2350,7 @@ class _InventoryPageState extends State<_InventoryPage> {
     final attachment = await pickOne(
       t('配件目录', 'Attachment catalog'),
       attachments,
-      weapon: false,
+      kind: _ArmoryCatalogKind.attachment,
     );
     if (attachment == null || !mounted) return;
     final id = hexId(attachment['id'] as int);
@@ -2344,13 +2367,13 @@ class _InventoryPageState extends State<_InventoryPage> {
     final weapon = await pickOne(
       t('选择要改配件的武器', 'Choose weapon to customize'),
       weapons.where(hasInventoryId).toList(),
-      weapon: true,
+      kind: _ArmoryCatalogKind.weapon,
     );
     if (weapon == null || !mounted) return;
     final from = await pickOne(
       t('选择原有配件', 'Choose existing attachment'),
       attachments.where((item) => (item['slots'] as List).isNotEmpty).toList(),
-      weapon: false,
+      kind: _ArmoryCatalogKind.attachment,
     );
     if (from == null || !mounted) return;
     final slots = (from['slots'] as List).toSet();
@@ -2364,7 +2387,7 @@ class _InventoryPageState extends State<_InventoryPage> {
     final to = await pickOne(
       t('选择同槽位的替换配件', 'Choose replacement in the same slot'),
       candidates,
-      weapon: false,
+      kind: _ArmoryCatalogKind.attachment,
     );
     if (to == null || !mounted) return;
     setState(() {
@@ -2494,6 +2517,7 @@ class _InventoryPageState extends State<_InventoryPage> {
           : <String, dynamic>{
               'enabled': enabled,
               'unlockAllWeapons': unlockAllWeapons,
+              if (unlockAllStratagems) 'unlockAllStratagems': true,
               'items': [
                 for (final id in parseIds(add.text))
                   {'mixId': id, 'amount': 1, 'isDiscovered': false},
@@ -2585,6 +2609,35 @@ class _InventoryPageState extends State<_InventoryPage> {
                       unlockAllWeapons = value;
                       if (value) enabled = true;
                     }),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: Text(
+                t('解锁所有战备（本地预览）', 'Unlock all stratagems (local preview)'),
+              ),
+              subtitle: Text(
+                t(
+                  '保存后，游戏重新读取库存时会补齐物品目录中的战备许可。战备能否装备由游戏决定。',
+                  'After saving, the next inventory refresh previews licenses from the item catalog. The game determines which stratagems can be equipped.',
+                ),
+              ),
+              value: unlockAllStratagems,
+              onChanged: busy || !loaded
+                  ? null
+                  : (value) => setState(() {
+                      unlockAllStratagems = value;
+                      if (value) enabled = true;
+                    }),
+              secondary: OutlinedButton(
+                onPressed: !loaded || busy
+                    ? null
+                    : () => pickCatalog(
+                        t('战备目录', 'Stratagem catalog'),
+                        stratagems,
+                        kind: _ArmoryCatalogKind.stratagem,
+                      ),
+                child: Text(t('浏览战备', 'Browse stratagems')),
+              ),
             ),
             const SizedBox(height: 16),
             TextField(
