@@ -86,7 +86,6 @@ def stratagem_licenses(document):
     return tuple(sorted({
         row["mixId"] for row in document
         if row.get("progressionCategory") == STRATAGEM_LICENSE_CATEGORY
-        and row.get("isConsumable") is False
         and type(row.get("mixId")) is int and 0 < row["mixId"] <= 0xFFFFFFFF
     }))
 
