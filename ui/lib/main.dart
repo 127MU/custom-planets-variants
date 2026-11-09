@@ -1295,6 +1295,15 @@ class _CpvAppState extends State<CpvApp>
         ),
       ) ??
       false;
+  String get connectionStatus {
+    final status = state['status']?.toString() ?? '';
+    final separator = status.indexOf(' / ');
+    if (separator < 0) return status;
+    return en
+        ? status.substring(separator + 3)
+        : status.substring(0, separator);
+  }
+
   Widget connectionPage() => ListView(
     padding: const EdgeInsets.only(bottom: 24),
     children: [
@@ -1332,7 +1341,7 @@ class _CpvAppState extends State<CpvApp>
               ],
             ),
             const SizedBox(height: 16),
-            SelectableText(state['status']?.toString() ?? ''),
+            SelectableText(connectionStatus),
             const SizedBox(height: 18),
             Wrap(
               spacing: 12,
@@ -3097,22 +3106,13 @@ class _EffectLibraryState extends State<EffectLibrary> {
                       '#$id  ·  ${groups[row['groupKey']]?[widget.en ? 1 : 0] ?? row['groupKey']}${row['experimental'] == true ? '  ·  ${widget.en ? 'Experimental' : '实验性'}' : ''}',
                       style: const TextStyle(fontSize: 12),
                     ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.info_outline),
+                      tooltip: widget.en ? 'View details' : '查看详情',
+                      onPressed: () => showEffectDetails(row),
+                    ),
                     onTap: widget.onToggle == null
-                        ? () => showDialog<void>(
-                            context: context,
-                            builder: (context) => AlertDialog(
-                              title: Text(recordName(row, widget.en)),
-                              content: SelectableText(
-                                '#$id\n${row['description'] ?? row['reference_note'] ?? ''}\n\n${widget.en ? 'A catalog entry does not guarantee in-game compatibility.' : '目录候选不等于已验证可用。'}',
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.pop(context),
-                                  child: Text(widget.en ? 'Close' : '关闭'),
-                                ),
-                              ],
-                            ),
-                          )
+                        ? () => showEffectDetails(row)
                         : () => widget.onToggle!(id),
                   ),
                 ),
@@ -3121,6 +3121,46 @@ class _EffectLibraryState extends State<EffectLibrary> {
           ),
         ),
       ],
+    );
+  }
+
+  Future<void> showEffectDetails(Json row) {
+    final en = widget.en;
+    final temporary = row['effectType'] == 32;
+    final description =
+        row['stratagemDetails']?[en ? 'en' : 'zh'] ??
+        (en
+            ? row['englishDescription']
+            : row['description'] ?? row['reference_note']);
+    final paragraphs = [
+      '#${row['id']}',
+      if (description is String && description.trim().isNotEmpty) description,
+      if (temporary) ...[
+        en
+            ? 'How to use\nSelect this effect in a planet plan, then save the plan. The game can offer the stratagem as a temporary option when war status refreshes.'
+            : '使用方法\n在星球方案的“效果”中勾选此项并保存。游戏刷新战况后，可用的战备会作为临时选项出现。',
+        en
+            ? 'The game limits how many temporary stratagems can be used at once. Extra selections may not appear.'
+            : '游戏限制同时可用的临时战备数量。选得太多时，部分战备可能不会出现。',
+      ],
+      if (row['experimental'] == true)
+        en
+            ? 'In-game availability still needs verification.'
+            : '此条目仍需验证在游戏中是否可用。',
+    ];
+    return showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: Text(recordName(row, en)),
+        content: SelectableText(paragraphs.join('\n\n')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(en ? 'Close' : '关闭'),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -3463,7 +3503,7 @@ class _PlanetEditorState extends State<PlanetEditor> {
                 if (race == 1) (1, t('沿用旧设置', 'Keep legacy setting')),
                 (2, t('终结族', 'Terminids')),
                 (3, t('机器人', 'Automatons')),
-                (4, t('光能族', 'Illuminate')),
+                (4, t('光能者', 'Illuminate')),
               ])
                 ChoiceChip(
                   label: Text(item.$2),
@@ -3573,7 +3613,7 @@ class _PlanetEditorState extends State<PlanetEditor> {
           t('超级地球', 'Super Earth'),
           t('终结族', 'Terminids'),
           t('机器人', 'Automatons'),
-          t('光能族', 'Illuminate'),
+          t('光能者', 'Illuminate'),
         ],
         hint: t(
           '选择超级地球或敌人控制这颗星球。“保留原样”不修改控制方。',
@@ -3608,15 +3648,15 @@ class _PlanetEditorState extends State<PlanetEditor> {
         'campaign_type',
         t('特殊作战', 'Special operations'),
         [
-          t('普通解放', 'Standard liberation'),
-          t('侦察战役', 'Recon campaign'),
-          t('高优先级战役', 'High-priority campaign'),
+          t('普通作战', 'Standard operations'),
+          t('侦察作战', 'Recon operations'),
+          t('高优先级作战', 'High-priority operations'),
           t('城市作战', 'City operations'),
           t('防守（实验性）', 'Defense (experimental)'),
         ],
         hint: t(
-          '需要侦察或高优先级作战时再改。不确定时选普通解放。',
-          'Change only if you want recon or high-priority operations. Otherwise use standard liberation.',
+          '需要侦察或高优先级作战时再改。不确定时选普通作战。',
+          'Change only if you want recon or high-priority operations. Otherwise choose standard operations.',
         ),
       ),
       if (draft['campaign'] == true || draft['force_open'] == true)

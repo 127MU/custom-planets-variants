@@ -85,7 +85,7 @@ dependencies = [
 
 [[package]]
 name = "cpv-core"
-version = "2.0.3"
+version = "2.0.4"
 dependencies = [
  "anyhow",
  "base64",
