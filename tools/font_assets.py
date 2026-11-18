@@ -34,6 +34,16 @@ def has_glyph(data, code):
 def verify_icons(root):
     font = root/'data/flutter_assets/fonts/MaterialIcons-Regular.otf'
     data = font.read_bytes()
-    for name, code in [('download', 0xe201), ('fact_check_outlined', 0xf045)]:
+    required = {
+        'download': 0xe201,
+        'fact_check_outlined': 0xf045,
+        'palette_outlined': 0xf24f,
+        'wallpaper_outlined': 0xf4ad,
+        'tune': 0xe683,
+        'bookmarks_outlined': 0xeee5,
+        'monitor_heart_outlined': 0xf0635,
+        'info_outline': 0xe33d,
+    }
+    for name, code in required.items():
         if not has_glyph(data, code):
             raise RuntimeError(f'Release font is missing {name}; clean and rebuild Flutter assets before packaging')

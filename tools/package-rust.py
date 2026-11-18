@@ -11,9 +11,12 @@ p=argparse.ArgumentParser()
 p.add_argument('--output',type=Path,required=True)
 p.add_argument('--proxy-runtime',type=Path,required=True)
 p.add_argument('--solid-payload',type=Path,help='Write an XZ launcher payload containing the complete distribution')
+p.add_argument('--launcher-only',action='store_true',help='Prepare the launcher payload without generating distribution ZIP files')
 p.add_argument('--flutter-build',type=Path,default=ROOT/'ui/build/windows/x64/runner/Release')
 p.add_argument('--rust-build',type=Path,default=ROOT/'backend/target/release')
 a=p.parse_args()
+if a.launcher_only and not a.solid_payload:
+    p.error('--launcher-only requires --solid-payload')
 verify_icons(a.flutter_build)
 if not (a.flutter_build/'url_launcher_windows_plugin.dll').is_file():
     p.error('Windows browser launcher plugin is missing from the Flutter build')
@@ -67,6 +70,9 @@ if a.solid_payload:
     a.solid_payload.parent.mkdir(parents=True, exist_ok=True)
     with lzma.open(a.solid_payload, 'wb', preset=6) as payload:
         payload.write(stored.getbuffer())
+if a.launcher_only:
+    print(json.dumps({'release':str(release),'files':len(files)},ensure_ascii=False))
+    raise SystemExit(0)
 archive=out/(release.name+'_Windows.zip')
 with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
     for f in release.rglob('*'):

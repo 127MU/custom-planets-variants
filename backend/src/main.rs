@@ -127,6 +127,60 @@ fn steam_option_path(path: &Path) -> String {
         text
     }
 }
+fn validate_appearance_setting(key: &str, value: &Value) -> Result<()> {
+    let valid = match key {
+        "colorSource" => matches!(value.as_str(), Some("preset" | "custom" | "wallpaper")),
+        "palette" => matches!(
+            value.as_str(),
+            Some("expressive" | "tonalSpot" | "vibrant" | "fidelity" | "monochrome")
+        ),
+        "customColor" => value.as_str().is_some_and(|hex| {
+            hex.len() == 7
+                && hex.starts_with('#')
+                && hex[1..].bytes().all(|byte| byte.is_ascii_hexdigit())
+        }),
+        "wallpaperOpacity" | "customColorOpacity" => {
+            value.as_f64().is_some_and(|n| (0.0..=1.0).contains(&n))
+        }
+        "backgroundBrightness" => value.as_f64().is_some_and(|n| (0.3..=1.5).contains(&n)),
+        "backgroundBlur" => value.as_f64().is_some_and(|n| (0.0..=30.0).contains(&n)),
+        "backgroundOverlay" => value.as_f64().is_some_and(|n| (0.0..=0.8).contains(&n)),
+        "backgroundX" | "backgroundY" => value.as_f64().is_some_and(|n| (-1.0..=1.0).contains(&n)),
+        "textScale" => value.as_f64().is_some_and(|n| (0.85..=1.3).contains(&n)),
+        "backgroundFit" => matches!(value.as_str(), Some("cover" | "contain" | "fill")),
+        "backgroundOverlayColor" => value.as_str().is_some_and(|s| s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|b| b.is_ascii_hexdigit())),
+        "density" => matches!(value.as_str(), Some("compact" | "normal" | "comfortable")),
+        "animations" | "pauseVideoMinimized" | "pauseVideoGame" | "scheduledTheme" | "sidebarCollapsed" => value.is_boolean(),
+        "dayHour" | "nightHour" => value.as_u64().is_some_and(|n| n <= 23),
+        "themePresets" => value.as_array().is_some_and(|v| v.len() <= 24 && v.iter().all(|p| {
+            p["name"].as_str().is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 40)
+            && p["appearance"].as_object().is_some_and(|a| a.len() <= 30 && a.iter().all(|(k,v)| {
+                match k.as_str() {
+                    "theme" => matches!(v.as_str(), Some("light" | "dark" | "system")),
+                    "accent" => v.as_u64().is_some_and(|n| n <= 3),
+                    "material" => matches!(v.as_str(), Some("solid" | "frosted")),
+                    "opacity" => v.as_f64().is_some_and(|n| (0.2..=1.0).contains(&n)),
+                    "backgroundImage" | "backgroundVideo" | "backgroundVideoPreview" =>
+                        v.is_null() || v.as_str().is_some_and(|s| s.len() <= 32768),
+                    "themePresets" => false,
+                    _ => validate_appearance_setting(k,v).is_ok(),
+                }
+            }))
+        })),
+        "cardImages" => value.as_object().is_some_and(|images| {
+            images.iter().all(|(id, image)| {
+                id.parse::<u32>().is_ok()
+                    && image
+                        .as_str()
+                        .is_some_and(|path| !path.is_empty() && path.len() <= 32768)
+            })
+        }),
+        _ => false,
+    };
+    ensure!(valid, "Invalid appearance setting: {key}");
+    Ok(())
+}
+
 struct Host {
     profile: PathBuf,
     _profile_lock: fs::File,
@@ -168,7 +222,7 @@ impl Host {
             "设置文件无效，原文件已保留 / Invalid settings document; original file retained"
         );
         if let Some(v) = settings.get("language") {
-            ensure!(v == "zh" || v == "en", "Invalid language setting");
+            ensure!(v == "zh" || v == "en" || v == "system", "Invalid language setting");
         }
         if let Some(v) = settings.get("theme") {
             ensure!(
@@ -181,6 +235,9 @@ impl Host {
                 v == "solid" || v == "frosted" || v == "liquid",
                 "Invalid material setting"
             );
+        }
+        if settings["material"] == "liquid" {
+            settings["material"] = json!("frosted");
         }
         if let Some(v) = settings.get("opacity") {
             ensure!(
@@ -200,8 +257,25 @@ impl Host {
         if let Some(v) = settings.get("diagnostics") {
             ensure!(v.is_boolean(), "Invalid diagnostics setting");
         }
-        if let Some(v) = settings.get("backgroundImage") {
-            ensure!(v.is_null() || v.is_string(), "Invalid background image");
+        for key in ["backgroundImage", "backgroundVideo", "backgroundVideoPreview"] {
+            if let Some(v) = settings.get(key) {
+                ensure!(v.is_null() || v.is_string(), "Invalid background path");
+            }
+        }
+        for key in [
+            "colorSource",
+            "palette",
+            "customColor",
+            "cardImages",
+            "wallpaperOpacity",
+            "customColorOpacity",
+            "backgroundBrightness", "backgroundBlur", "backgroundOverlay", "backgroundX", "backgroundY",
+            "backgroundFit", "backgroundOverlayColor", "textScale", "density", "animations",
+            "pauseVideoMinimized", "pauseVideoGame", "scheduledTheme", "sidebarCollapsed", "dayHour", "nightHour", "themePresets",
+        ] {
+            if let Some(value) = settings.get(key) {
+                validate_appearance_setting(key, value)?;
+            }
         }
         let path = profile.join("war-targets.json");
         let targets = if path.exists() {
@@ -554,13 +628,17 @@ impl Host {
                 let mut next = self.settings.clone();
                 for (key, value) in args.as_object().unwrap() {
                     match key.as_str() {
-                        "language" => ensure!(value == "zh" || value == "en", "Invalid language"),
+                        "language" => ensure!(
+                            value == "zh" || value == "en" || value == "system",
+                            "Invalid language"
+                        ),
+                        "uiMotion" => ensure!(value == "on" || value == "off", "Invalid interface motion"),
                         "theme" => ensure!(
                             value == "light" || value == "dark" || value == "system",
                             "Invalid theme"
                         ),
                         "material" => ensure!(
-                            value == "frosted" || value == "liquid" || value == "solid",
+                            value == "frosted" || value == "solid",
                             "Invalid material"
                         ),
                         "opacity" => ensure!(
@@ -579,11 +657,18 @@ impl Host {
                         }
                         "runtime" => ensure!(value.is_string(), "Invalid runtime"),
                         "diagnostics" => ensure!(value.is_boolean(), "Invalid diagnostics switch"),
-                        "backgroundImage" => ensure!(
+                        "backgroundImage" | "backgroundVideo" | "backgroundVideoPreview" => ensure!(
                             value.is_null()
                                 || value.as_str().is_some_and(|path| path.len() <= 32768),
-                            "Invalid background image"
+                            "Invalid background path"
                         ),
+                        "colorSource" | "palette" | "customColor" | "cardImages"
+                        | "wallpaperOpacity" | "customColorOpacity"
+                        | "backgroundBrightness" | "backgroundBlur" | "backgroundOverlay" | "backgroundX" | "backgroundY"
+                        | "backgroundFit" | "backgroundOverlayColor" | "textScale" | "density" | "animations"
+                        | "pauseVideoMinimized" | "pauseVideoGame" | "scheduledTheme" | "sidebarCollapsed" | "dayHour" | "nightHour" | "themePresets" => {
+                            validate_appearance_setting(key, value)?;
+                        }
                         _ => bail!("Unknown setting: {key}"),
                     };
                     next[key] = value.clone();
@@ -790,6 +875,19 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn theme_settings_validate_nested_presets() {
+        let valid = json!([{"name":"夜间","appearance":{
+            "theme":"dark", "accent":0, "backgroundFit":"contain",
+            "backgroundOverlayColor":"#123456", "backgroundBlur":12.0,
+            "scheduledTheme":true, "dayHour":7, "nightHour":19,
+            "backgroundVideo":null, "backgroundVideoPreview":null
+        }}]);
+        assert!(validate_appearance_setting("themePresets", &valid).is_ok());
+        let invalid = json!([{"name":"bad","appearance":{"backgroundBlur":100}}]);
+        assert!(validate_appearance_setting("themePresets", &invalid).is_err());
+        assert!(validate_appearance_setting("dayHour", &json!(24)).is_err());
+    }
     fn profile(label: &str) -> PathBuf {
         let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../build/rust-tests")
@@ -811,15 +909,33 @@ mod tests {
                 .unwrap();
             h.request(
                 "settings",
-                json!({"language":"en","theme":"dark","material":"liquid"}),
+                json!({
+                    "language":"en","theme":"dark","material":"frosted",
+                    "colorSource":"custom","palette":"vibrant","customColor":"#1778FF",
+                    "customColorOpacity":0.8,"wallpaperOpacity":0.5,
+                    "cardImages":{"64":"cover.png"}
+                }),
             )
             .unwrap();
             assert!(h.request("settings", json!({"opacity":2})).is_err());
+            assert!(h.request("settings", json!({"customColor":"#12"})).is_err());
+            assert!(h.request("settings", json!({"cardImages":{"bad":"cover.png"}})).is_err());
         }
         let mut h = Host::new(p.clone()).unwrap();
         assert_eq!(h.targets[0]["effects"], json!([1346, 1431]));
         assert_eq!(h.settings["language"], "en");
+        assert_eq!(h.settings["customColor"], "#1778FF");
+        assert_eq!(h.settings["customColorOpacity"], 0.8);
+        assert_eq!(h.settings["cardImages"]["64"], "cover.png");
         assert_eq!(h.poll().unwrap()["active"], false);
+        drop(h);
+        let settings_path = p.join("cpv-settings.json");
+        let mut old_settings = read_json(&settings_path).unwrap();
+        old_settings["material"] = json!("liquid");
+        write_json(&settings_path, &old_settings).unwrap();
+        let h = Host::new(p.clone()).unwrap();
+        assert_eq!(h.settings["material"], "frosted");
+        assert_eq!(h.settings["cardImages"]["64"], "cover.png");
         assert!(!p.join("war-proxy/steam-proxy.ini").exists());
         assert!(!h.cert().exists());
     }

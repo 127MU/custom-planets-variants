@@ -6,7 +6,10 @@ void main() {
   test(
     'native core shutdown is idempotent under simultaneous exit callbacks',
     () async {
-      final exe = File('../backend/target/release/cpv-core.exe').absolute;
+      final exe = File(
+        Platform.environment['CPV_TEST_CORE'] ??
+            '../backend/target/release/cpv-core.exe',
+      ).absolute;
       final profile = Directory(
         'build/ipc-close-${DateTime.now().microsecondsSinceEpoch}',
       ).absolute;

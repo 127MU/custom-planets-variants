@@ -1,7 +1,7 @@
 name: cpv
-description: Custom Planets & Variants. Rust core with Morrow glass surfaces.
+description: Custom Planets & Variants. Rust core with a Flutter desktop interface.
 publish_to: none
-version: 2.0.3+1
+version: 2.0.5+1
 environment:
   sdk: ^3.12.0
 dependencies:
@@ -12,6 +12,7 @@ dependencies:
   file_selector: ^1.0.3
   window_manager: ^0.5.2
   url_launcher: ^6.3.3
+  video_player_win: 3.3.1
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -21,5 +22,3 @@ flutter:
   assets:
     - assets/cpv.png
     - assets/armory_catalog.json
-  shaders:
-    - shaders/liquid_glass.frag

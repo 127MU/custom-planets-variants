@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:cpv/main.dart';
 import 'package:cpv/updates.dart';
 import 'package:cpv/core.dart';
+import 'package:cpv/expressive_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart' hide matches;
 import 'dart:io';
@@ -81,6 +82,43 @@ class DelayedCertificateCore extends FakeCore {
 }
 
 void main() {
+  testWidgets('color picker synchronizes HEX, RGB and transparency', (
+    tester,
+  ) async {
+    Color? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () async => result = await showDialog<Color>(
+              context: context,
+              builder: (_) => const CustomThemeColorDialog(
+                initial: Color(0xff1778ff),
+                english: true,
+              ),
+            ),
+            child: const Text('Choose'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Choose'));
+    await tester.pumpAndSettle();
+    final fields = find.byType(TextField);
+    await tester.enterText(fields.at(0), '#33CC66');
+    await tester.pump();
+    expect(tester.widget<TextField>(fields.at(2)).controller!.text, '204');
+    await tester.enterText(fields.at(1), '64');
+    await tester.pump();
+    expect(tester.widget<TextField>(fields.at(0)).controller!.text, '#40CC66');
+    await tester.tap(find.bySemanticsLabel('Color opacity'));
+    await tester.pump();
+    await tester.tap(find.text('Apply'));
+    await tester.pumpAndSettle();
+    expect(ExpressiveTheme.hex(result!), '#40CC66');
+    expect(result!.a, closeTo(.5, .01));
+  });
+
   setUpAll(() async {
     final sdk = Platform.environment['FLUTTER_ROOT'];
     if (sdk != null) {
@@ -114,6 +152,35 @@ void main() {
     expect(matches(row, 'bugs_acid'), isTrue);
     expect(matches(row, 'other'), isFalse);
   });
+
+  testWidgets('legacy card images do not change planet cards', (tester) async {
+    tester.view.physicalSize = const Size(900, 650);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final core = FakeCore()
+      ..targets = [
+        {'planet': 64, 'effects': <int>[], 'enabled': true},
+        {'planet': 65, 'effects': <int>[], 'enabled': true},
+      ];
+    core.settings['cardImages'] = {
+      '64': 'missing-64.png',
+      '65': 'missing-65.png',
+    };
+    await tester.pumpWidget(
+      CpvApp(core: core, initial: core.initial, nativeWindow: false),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('卡片封面'), findsNothing);
+    expect(core.settings['cardImages'], {
+      '64': 'missing-64.png',
+      '65': 'missing-65.png',
+    });
+    expect(core.targets.length, 2);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+  });
+
   testWidgets(
     'armory keeps weapon selections across searches and saves bulk mode',
     (tester) async {
@@ -123,15 +190,36 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
       final core = FakeCore();
       core.inventory['remove'] = [2112173638];
+      await tester.runAsync(
+        () => rootBundle.loadString('assets/armory_catalog.json'),
+      );
       await tester.pumpWidget(
         CpvApp(core: core, initial: core.initial, nativeWindow: false),
       );
       await tester.tap(find.byIcon(Icons.inventory_2_outlined));
       await tester.pumpAndSettle();
+      final weaponButton = find.widgetWithText(FilledButton, '选武器');
+      for (
+        var attempt = 0;
+        attempt < 20 &&
+            tester.widget<FilledButton>(weaponButton).onPressed == null;
+        attempt++
+      ) {
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 25)),
+        );
+        await tester.pump();
+      }
+      expect(tester.widget<FilledButton>(weaponButton).onPressed, isNotNull);
       expect(find.text('隐藏的物品 ID'), findsNothing);
+      await tester.ensureVisible(weaponButton);
       await tester.tap(find.text('选武器'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField).last, 'FAF-14');
+      final weaponSearch = find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.byType(TextField),
+      );
+      await tester.enterText(weaponSearch, 'FAF-14');
       await tester.pumpAndSettle();
       expect(find.textContaining('仅查看，需通过战略配备使用'), findsOneWidget);
       expect(
@@ -140,11 +228,11 @@ void main() {
             .onChanged,
         isNull,
       );
-      await tester.enterText(find.byType(TextField).last, '切变');
+      await tester.enterText(weaponSearch, '切变');
       await tester.pumpAndSettle();
       await tester.tap(find.text('LAS-22 切变'));
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField).last, 'AR-23');
+      await tester.enterText(weaponSearch, 'AR-23');
       await tester.pumpAndSettle();
       await tester.tap(find.text('AR-23 解放者'));
       await tester.pumpAndSettle();
@@ -232,7 +320,7 @@ void main() {
       await tester.tap(find.text('EN'));
       await tester.pumpAndSettle();
       await tester.pump(const Duration(milliseconds: 400));
-      expect(find.text('Planet plans'), findsOneWidget);
+      expect(find.text('Planet plans'), findsAtLeastNWidgets(1));
       expect(core.settings['language'], 'en');
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox());
@@ -326,6 +414,8 @@ void main() {
     expect((tester.getCenter(find.text('移除信任')).dy - y).abs(), lessThan(1));
     await tester.tap(find.byIcon(Icons.tune_rounded));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('诊断与日志').first);
+    await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
       find.text('运行诊断'),
       500,
@@ -404,6 +494,8 @@ void main() {
       );
       await tester.tap(find.byIcon(Icons.tune_rounded));
       await tester.pumpAndSettle();
+      await tester.tap(find.text('关于与更新').first);
+      await tester.pumpAndSettle();
       await tester.scrollUntilVisible(
         find.text('检查更新'),
         500,
@@ -425,7 +517,7 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     },
   );
-  testWidgets('responsive pages and Morrow appearance previews', (
+  testWidgets('responsive pages and expressive appearance previews', (
     tester,
   ) async {
     tester.view.physicalSize = const Size(1280, 850);
@@ -433,6 +525,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     final core = FakeCore();
+    core.settings['animations'] = false;
     core.targets = [
       {
         'planet': 64,
@@ -478,9 +571,21 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
     }
-    await tester.ensureVisible(find.text('液态玻璃'));
+    await tester.scrollUntilVisible(
+      find.text('卡片样式'),
+      300,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.tap(find.text('卡片样式'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('液态玻璃'));
+    await tester.scrollUntilVisible(
+      find.text('实色'),
+      300,
+      scrollable: find.byType(Scrollable).last,
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('液态玻璃'), findsNothing);
+    await tester.tap(find.text('实色'));
     await tester.pumpAndSettle();
     await tester.scrollUntilVisible(
       find.text('颜色模式'),

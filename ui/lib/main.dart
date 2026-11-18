@@ -9,19 +9,50 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart' show RenderRepaintBoundary;
+import 'expressive_theme.dart';
+import 'interaction_motion.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player_win/video_player_win.dart';
 import 'updates.dart';
 import 'core.dart';
 import 'diagnostics.dart';
 import 'planet_catalog.dart';
 import 'version.dart';
-import 'morrow/liquid_glass.dart';
+import 'wallpaper_library.dart';
+import 'theme_preferences.dart';
 
 typedef Json = Map<String, dynamic>;
+int stablePlanColumns(double width, int? previous) {
+  const thresholds = [420.0, 660.0, 900.0];
+  const margin = 20.0;
+  if (previous == null) {
+    return 1 + thresholds.where((value) => width >= value).length;
+  }
+  var columns = previous.clamp(1, 4);
+  while (columns < 4 && width >= thresholds[columns - 1] + margin) {
+    columns++;
+  }
+  while (columns > 1 && width < thresholds[columns - 2] - margin) {
+    columns--;
+  }
+  return columns;
+}
+
+bool stableWideLayout(double width, bool? previous) => previous == null
+    ? width >= 960
+    : previous
+    ? width >= 940
+    : width >= 980;
+bool isNightHour(int hour, int day, int night) => day == night
+    ? false
+    : day < night
+    ? hour < day || hour >= night
+    : hour >= night && hour < day;
 String recordName(Json row, bool english) =>
     (english
             ? row['englishName'] ?? row['native'] ?? row['name']
@@ -145,13 +176,16 @@ class CpvApp extends StatefulWidget {
 }
 
 class _CpvAppState extends State<CpvApp>
-    with WidgetsBindingObserver, WindowListener {
+    with WidgetsBindingObserver, WindowListener, TickerProviderStateMixin {
   late Json settings, state;
   late List<Json> targets, effects;
   late final ValueNotifier<List<Json>> planetCatalog;
   List<Json> get planets => planetCatalog.value;
   late final String currentVersion;
   int page = 0;
+  int? planColumns;
+  bool? wideLayout;
+  int settingsCategory = 0;
   int settingsRevision = 0;
   bool working = false, polling = false;
   bool checkingUpdates = false;
@@ -159,46 +193,123 @@ class _CpvAppState extends State<CpvApp>
   bool updateFailed = false;
   String query = '';
   Timer? timer, saveTimer;
+  Timer? appearanceTimer;
+  bool windowMinimized = false, gameRunning = false, checkingGame = false;
   Future<void>? closing;
   bool destroyingWindow = false;
   ui.Image? backgroundImage;
+  WinVideoPlayerController? backgroundVideo;
+  String? backgroundVideoError;
+  double? frostPreview;
   int backgroundRevision = 0;
   bool loadingBackground = false;
+  final workspace = GlobalKey();
+  final themeControl = GlobalKey();
+  final themeToggle = GlobalKey();
+  final backgroundControl = GlobalKey();
+  final backgroundClearControl = GlobalKey();
+  final videoControl = GlobalKey();
+  final workshopControl = GlobalKey();
+  late final AnimationController themeReveal;
+  late final AnimationController wallpaperReveal;
+  WinVideoPlayerController? outgoingVideo;
+  ui.Image? outgoingWallpaper;
+  bool wallpaperTransitionActive = false;
+  Offset wallpaperOrigin = Offset.zero;
+  ui.Image? previousTheme;
+  Offset revealOrigin = Offset.zero;
+  bool capturingTheme = false;
+  bool videoPausedForReveal = false;
   final messenger = GlobalKey<ScaffoldMessengerState>();
   final navigator = GlobalKey<NavigatorState>();
-  bool get en => settings['language'] == 'en';
+  bool get en =>
+      settings['language'] == 'en' ||
+      (settings['language'] == 'system' &&
+          ui.PlatformDispatcher.instance.locale.languageCode != 'zh');
   String t(String zh, String english) => en ? english : zh;
   String get title => t('自定义星球和变种', 'Custom Planets & Variants');
-  bool get dark =>
-      settings['theme'] == 'dark' ||
-      settings['theme'] == 'system' &&
-          WidgetsBinding.instance.platformDispatcher.platformBrightness ==
-              Brightness.dark;
-  Color get accent => [
-    const Color(0xff8270b2),
-    const Color(0xff6d9a8b),
-    const Color(0xffb28e73),
-    const Color(0xff7897c1),
-  ][(settings['accent'] as num? ?? 0).toInt()];
+  bool get dark => settings['scheduledTheme'] == true
+      ? isNightHour(
+          DateTime.now().hour,
+          settings['dayHour'] as int? ?? 7,
+          settings['nightHour'] as int? ?? 19,
+        )
+      : settings['theme'] == 'dark' ||
+            settings['theme'] == 'system' &&
+                WidgetsBinding.instance.platformDispatcher.platformBrightness ==
+                    Brightness.dark;
+  static const imageTypes = [
+    XTypeGroup(
+      label: 'Images',
+      extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'],
+    ),
+  ];
+  Color? wallpaperSeed;
+  double get customColorOpacity =>
+      (settings['customColorOpacity'] as num? ?? 1.0).toDouble();
+  String get colorSource => settings['colorSource'] as String? ?? 'preset';
+  String get palette => settings['palette'] as String? ?? 'expressive';
+  int get presetIndex => (settings['accent'] as num? ?? 0).toInt().clamp(0, 3);
+  Color? get customColor =>
+      ExpressiveTheme.parseColor(settings['customColor'] as String? ?? '');
+  Color get seed =>
+      switch (colorSource) {
+        'custom' => Color.alphaBlend(
+          (customColor ?? ExpressiveTheme.seeds[presetIndex]).withValues(
+            alpha: customColorOpacity,
+          ),
+          ExpressiveTheme.seeds[presetIndex],
+        ),
+        'wallpaper' => wallpaperSeed,
+        _ => null,
+      } ??
+      ExpressiveTheme.seeds[presetIndex];
+  Color get accent => appTheme.colorScheme.primary;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    themeReveal =
+        AnimationController(
+          vsync: this,
+          duration: const Duration(milliseconds: 340),
+        )..addStatusListener((status) {
+          if (status == AnimationStatus.completed) clearPreviousTheme();
+        });
+    wallpaperReveal =
+        AnimationController(
+          vsync: this,
+          duration: const Duration(milliseconds: 500),
+        )..addStatusListener((status) {
+          if (status == AnimationStatus.completed) clearOutgoingWallpaper();
+        });
     currentVersion = widget.version ?? readReleaseVersion();
     if (widget.nativeWindow && Platform.isWindows) {
       windowManager.addListener(this);
       windowManager.setPreventClose(true);
     }
     settings = Json.from(widget.initial['settings']);
-    if (settings['backgroundImage'] case final String path) {
-      loadBackground(path);
-    }
+    if (settings['material'] == 'liquid') settings['material'] = 'frosted';
+    final initialVideo = settings['backgroundVideo'];
+    final initialImage = settings['backgroundImage'];
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (initialVideo is String) {
+        unawaited(loadVideo(initialVideo, revision: backgroundRevision));
+      } else if (initialImage is String) {
+        unawaited(loadBackground(initialImage));
+      }
+    });
     Diagnostics.enabled = settings['diagnostics'] == true;
     state = Json.from(widget.initial['state']);
     targets = rows(widget.initial['targets']);
     effects = rows(widget.initial['catalog']['effects']);
     planetCatalog = ValueNotifier(rows(widget.initial['catalog']['planets']));
     timer = Timer.periodic(const Duration(seconds: 1), (_) => poll());
+    appearanceTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (settings['scheduledTheme'] == true && mounted) setState(() {});
+      checkVideoPlayback();
+    });
     if (widget.nativeWindow) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         checkForUpdates(automatic: true);
@@ -228,6 +339,7 @@ class _CpvAppState extends State<CpvApp>
 
   Future<void> closeOnce() => closing ??= () async {
     timer?.cancel();
+    appearanceTimer?.cancel();
     saveTimer?.cancel();
     try {
       await widget.core.call('settings', {...settings}..remove('installedCa'));
@@ -254,14 +366,72 @@ class _CpvAppState extends State<CpvApp>
   @override
   void dispose() {
     timer?.cancel();
+    appearanceTimer?.cancel();
     saveTimer?.cancel();
     backgroundImage?.dispose();
+    unawaited(backgroundVideo?.dispose() ?? Future<void>.value());
+    themeReveal.dispose();
+    wallpaperReveal.dispose();
+    unawaited(outgoingVideo?.dispose() ?? Future<void>.value());
+    previousTheme?.dispose();
     planetCatalog.dispose();
     WidgetsBinding.instance.removeObserver(this);
     if (widget.nativeWindow && Platform.isWindows) {
       windowManager.removeListener(this);
     }
     super.dispose();
+  }
+
+  @override
+  void onWindowMinimize() {
+    windowMinimized = true;
+    syncVideoPlayback();
+  }
+
+  @override
+  void onWindowRestore() {
+    windowMinimized = false;
+    syncVideoPlayback();
+  }
+
+  Future<void> checkVideoPlayback() async {
+    if (!Platform.isWindows ||
+        backgroundVideo == null ||
+        settings['pauseVideoGame'] == false ||
+        checkingGame) {
+      return;
+    }
+    checkingGame = true;
+    try {
+      final result = await Process.run('tasklist.exe', [
+        '/FI',
+        'IMAGENAME eq helldivers2.exe',
+        '/FO',
+        'CSV',
+        '/NH',
+      ]).timeout(const Duration(seconds: 5));
+      gameRunning =
+          result.exitCode == 0 &&
+          result.stdout.toString().toLowerCase().contains('helldivers2.exe');
+      await syncVideoPlayback();
+    } catch (_) {
+      // Leave the last known state intact if Windows cannot list processes.
+    } finally {
+      checkingGame = false;
+    }
+  }
+
+  Future<void> syncVideoPlayback() async {
+    final player = backgroundVideo;
+    if (player == null) return;
+    final paused =
+        videoPausedForReveal ||
+        (settings['pauseVideoMinimized'] != false && windowMinimized) ||
+        (settings['pauseVideoGame'] != false && gameRunning);
+    try {
+      if (paused && player.value.isPlaying) await player.pause();
+      if (!paused && !player.value.isPlaying) await player.play();
+    } catch (_) {}
   }
 
   Future<void> poll() async {
@@ -307,10 +477,13 @@ class _CpvAppState extends State<CpvApp>
   }
 
   void note(Object value) {
+    final context = workspace.currentContext;
+    final width = context == null ? 0.0 : MediaQuery.sizeOf(context).width;
     messenger.currentState?.showSnackBar(
       SnackBar(
         content: Text(value.toString()),
         behavior: SnackBarBehavior.floating,
+        margin: EdgeInsets.fromLTRB(width >= 960 ? 278 : 100, 0, 20, 18),
       ),
     );
   }
@@ -339,6 +512,12 @@ class _CpvAppState extends State<CpvApp>
     final previous = {...settings};
     final revision = ++settingsRevision;
     setState(() => settings = {...settings, ...change});
+    if (change.containsKey('pauseVideoMinimized') ||
+        change.containsKey('pauseVideoGame')) {
+      if (change['pauseVideoGame'] == false) gameRunning = false;
+      unawaited(syncVideoPlayback());
+      unawaited(checkVideoPlayback());
+    }
     Diagnostics.enabled = settings['diagnostics'] == true;
     final snapshot = {...settings}..remove('installedCa');
     saveTimer?.cancel();
@@ -358,7 +537,89 @@ class _CpvAppState extends State<CpvApp>
     });
   }
 
-  Future<void> loadBackground(String? path, {bool save = false}) async {
+  void clearPreviousTheme() {
+    final image = previousTheme;
+    videoPausedForReveal = false;
+    unawaited(syncVideoPlayback());
+    if (image != null) {
+      setState(() => previousTheme = null);
+      WidgetsBinding.instance.addPostFrameCallback((_) => image.dispose());
+    }
+  }
+
+  Future<void> changeTheme(String? mode, {GlobalKey? trigger}) async {
+    if (mode == null ||
+        (mode == settings['theme'] && settings['scheduledTheme'] != true)) {
+      return;
+    }
+    final systemDark =
+        WidgetsBinding.instance.platformDispatcher.platformBrightness ==
+        Brightness.dark;
+    final nextDark = mode == 'dark' || (mode == 'system' && systemDark);
+    final revision = settingsRevision;
+    if (nextDark != dark) await startReveal(trigger: trigger ?? themeControl);
+    if (mounted && settingsRevision == revision) {
+      await setting({'theme': mode, 'scheduledTheme': false});
+    }
+  }
+
+  Future<void> startReveal({GlobalKey? trigger}) async {
+    final context = workspace.currentContext;
+    if (previousTheme != null) {
+      themeReveal.stop();
+      clearPreviousTheme();
+    }
+    if (context == null ||
+        MediaQuery.disableAnimationsOf(context) ||
+        settings['animations'] == false ||
+        capturingTheme) {
+      return;
+    }
+    final renderObject = context.findRenderObject();
+    if (renderObject is! RenderRepaintBoundary) return;
+    final boundary = renderObject;
+    capturingTheme = true;
+    ui.Image? snapshot;
+    try {
+      if (backgroundVideo != null) {
+        videoPausedForReveal = true;
+        await syncVideoPlayback();
+      }
+      // Capture the workspace after the menu closes, without including the route.
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted ||
+          workspace.currentContext?.findRenderObject() != boundary) {
+        return;
+      }
+      snapshot = boundary.toImageSync(pixelRatio: 1);
+      if (!mounted) return;
+      final control = trigger?.currentContext?.findRenderObject();
+      revealOrigin = control is RenderBox && control.hasSize
+          ? boundary.globalToLocal(
+              control.localToGlobal(control.size.center(Offset.zero)),
+            )
+          : boundary.size.center(Offset.zero);
+      previousTheme = snapshot;
+      snapshot = null;
+      themeReveal.forward(from: 0);
+    } catch (_) {
+      // The next frame can apply the theme directly if capture is unavailable.
+    } finally {
+      capturingTheme = false;
+      snapshot?.dispose();
+      if (previousTheme == null) {
+        videoPausedForReveal = false;
+        unawaited(syncVideoPlayback());
+      }
+    }
+  }
+
+  Future<void> loadBackground(
+    String? path, {
+    bool save = false,
+    GlobalKey? trigger,
+  }) async {
+    if (wallpaperTransitionActive) clearOutgoingWallpaper();
     final revision = ++backgroundRevision;
     ui.Image? image;
     try {
@@ -384,17 +645,38 @@ class _CpvAppState extends State<CpvApp>
           codec.dispose();
         }
       }
+      final extracted = image == null
+          ? null
+          : await ExpressiveTheme.imageSeed(image);
+      if (!mounted || revision != backgroundRevision) {
+        image?.dispose();
+        return;
+      }
+      if (save && backgroundVideo == null) await startReveal(trigger: trigger);
       if (!mounted || revision != backgroundRevision) {
         image?.dispose();
         return;
       }
       final old = backgroundImage;
-      setState(() => backgroundImage = image);
+      setState(() {
+        backgroundImage = image;
+        wallpaperSeed = extracted;
+      });
+      image = null;
       if (old != null) {
         WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
       }
-      if (save) await setting({'backgroundImage': path});
+      if (save) {
+        await loadVideo(
+          null,
+          save: true,
+          revision: revision,
+          imagePath: path,
+          trigger: trigger,
+        );
+      }
     } catch (_) {
+      image?.dispose();
       if (mounted && save) {
         note(
           t(
@@ -406,18 +688,200 @@ class _CpvAppState extends State<CpvApp>
     }
   }
 
+  void clearOutgoingWallpaper() {
+    wallpaperReveal.stop();
+    final old = outgoingVideo;
+    outgoingVideo = null;
+    outgoingWallpaper = null;
+    if (wallpaperTransitionActive && mounted) {
+      setState(() => wallpaperTransitionActive = false);
+    } else {
+      wallpaperTransitionActive = false;
+    }
+    if (old != null) {
+      WidgetsBinding.instance.addPostFrameCallback(
+        (_) => unawaited(old.dispose()),
+      );
+    }
+  }
+
+  Future<void> loadVideo(
+    String? path, {
+    bool save = false,
+    int? revision,
+    String? imagePath,
+    GlobalKey? trigger,
+  }) async {
+    if (path != null && !Platform.isWindows) return;
+    final operation = revision ?? ++backgroundRevision;
+    WinVideoPlayerController? candidate;
+    try {
+      if (path != null) {
+        if (!isWallpaperVideo(path) || !await File(path).exists()) {
+          throw const FormatException();
+        }
+        candidate = WinVideoPlayerController.file(File(path));
+        await candidate.initialize();
+        if (!candidate.value.isInitialized || candidate.value.size.isEmpty) {
+          throw const FormatException();
+        }
+        await candidate.setVolume(0);
+        await candidate.setLooping(true);
+        await candidate.play();
+      }
+      if (!mounted || operation != backgroundRevision) return;
+      final previous = backgroundVideo;
+      final context = workspace.currentContext;
+      final animate =
+          save &&
+          context != null &&
+          context.mounted &&
+          !MediaQuery.disableAnimationsOf(context) &&
+          settings['animations'] != false &&
+          (previous != null || candidate != null);
+      if (animate && previous != null) await previous.pause();
+      if (!mounted || operation != backgroundRevision) {
+        if (mounted) unawaited(syncVideoPlayback());
+        return;
+      }
+      if (animate && context.mounted) {
+        clearOutgoingWallpaper();
+        final boundary = context.findRenderObject();
+        final control = trigger?.currentContext?.findRenderObject();
+        wallpaperOrigin =
+            boundary is RenderBox && control is RenderBox && control.hasSize
+            ? boundary.globalToLocal(
+                control.localToGlobal(control.size.center(Offset.zero)),
+              )
+            : boundary is RenderBox
+            ? boundary.size.center(Offset.zero)
+            : Offset.zero;
+      }
+      setState(() {
+        backgroundVideo = candidate;
+        if (animate) {
+          outgoingVideo = previous;
+          outgoingWallpaper = previous == null ? backgroundImage : null;
+          wallpaperTransitionActive = true;
+        }
+        backgroundVideoError = null;
+        if (path != null) wallpaperSeed = null;
+      });
+      candidate = null;
+      if (animate) wallpaperReveal.forward(from: 0);
+      unawaited(checkVideoPlayback());
+      unawaited(syncVideoPlayback());
+      if (!save && path != null) {
+        final preview = settings['backgroundVideoPreview'];
+        if (preview is String) {
+          unawaited(loadWallpaperPreview(preview, videoPath: path));
+        }
+      }
+      if (previous != null && !animate) {
+        WidgetsBinding.instance.addPostFrameCallback(
+          (_) => unawaited(previous.dispose()),
+        );
+      }
+      if (save) {
+        await setting({
+          'backgroundVideo': path,
+          'backgroundVideoPreview': null,
+          if (path == null) 'backgroundImage': imagePath,
+        });
+      }
+    } catch (_) {
+      if (mounted && operation == backgroundRevision) {
+        final message = t(
+          '无法播放视频，请确认文件仍在原位置，或尝试 MP4（H.264）。',
+          'Could not play this video. Check the file location or try an H.264 MP4.',
+        );
+        if (save) {
+          note(message);
+        } else {
+          setState(() => backgroundVideoError = message);
+          final fallback = settings['backgroundImage'];
+          if (fallback is String) unawaited(loadBackground(fallback));
+        }
+      }
+    } finally {
+      await candidate?.dispose();
+    }
+  }
+
+  Future<void> chooseVideo({bool workshop = false}) async {
+    setState(() => loadingBackground = true);
+    try {
+      final selection = workshop
+          ? await showDialog<WallpaperVideo>(
+              context: navigator.currentState!.overlay!.context,
+              builder: (_) => WallpaperLibrary(english: en),
+            )
+          : (await openFile(
+              acceptedTypeGroups: const [
+                XTypeGroup(label: 'Video', extensions: videoExtensions),
+              ],
+            ))?.path;
+      final path = selection is WallpaperVideo
+          ? selection.path
+          : selection as String?;
+      if (path != null && mounted) {
+        await loadVideo(
+          path,
+          save: true,
+          trigger: workshop ? workshopControl : videoControl,
+        );
+        if (selection is WallpaperVideo && selection.preview != null) {
+          await loadWallpaperPreview(selection.preview!, videoPath: path);
+          await setting({'backgroundVideoPreview': selection.preview});
+        }
+      }
+    } catch (_) {
+      if (mounted) note(t('无法打开视频选择器', 'Could not open the video picker'));
+    } finally {
+      if (mounted) setState(() => loadingBackground = false);
+    }
+  }
+
+  Future<void> loadWallpaperPreview(
+    String path, {
+    required String videoPath,
+  }) async {
+    final operation = backgroundRevision;
+    ui.Image? image;
+    try {
+      final file = File(path);
+      if (await file.length() > 24 * 1024 * 1024) return;
+      final bytes = await file.readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes, targetWidth: 64);
+      try {
+        image = (await codec.getNextFrame()).image;
+      } finally {
+        codec.dispose();
+      }
+      final seed = await ExpressiveTheme.imageSeed(image);
+      if (mounted &&
+          operation == backgroundRevision &&
+          backgroundVideo?.dataSource == videoPath) {
+        setState(() => wallpaperSeed = seed);
+      }
+    } catch (_) {
+      if (mounted &&
+          operation == backgroundRevision &&
+          backgroundVideo?.dataSource == videoPath) {
+        setState(() => wallpaperSeed = null);
+      }
+    } finally {
+      image?.dispose();
+    }
+  }
+
   Future<void> chooseBackground() async {
     setState(() => loadingBackground = true);
     try {
-      final file = await openFile(
-        acceptedTypeGroups: const [
-          XTypeGroup(
-            label: 'Images',
-            extensions: ['png', 'jpg', 'jpeg', 'webp', 'bmp'],
-          ),
-        ],
-      );
-      if (file != null && mounted) await loadBackground(file.path, save: true);
+      final file = await openFile(acceptedTypeGroups: imageTypes);
+      if (file != null && mounted) {
+        await loadBackground(file.path, save: true, trigger: backgroundControl);
+      }
     } catch (_) {
       if (mounted) note(t('无法打开图片选择器', 'Could not open the image picker'));
     } finally {
@@ -425,7 +889,226 @@ class _CpvAppState extends State<CpvApp>
     }
   }
 
-  double get backgroundImageOpacity => dark ? .28 : .46;
+  double get wallpaperVisibility =>
+      (settings['wallpaperOpacity'] as num? ?? 1.0).toDouble();
+  double get backgroundImageOpacity => wallpaperVisibility * (dark ? .28 : .46);
+
+  Map<String, dynamic> get themeOptions => {
+    'theme': settings['theme'] ?? 'light',
+    'accent': presetIndex,
+    'colorSource': colorSource,
+    'palette': palette,
+    'customColor':
+        settings['customColor'] ??
+        ExpressiveTheme.hex(ExpressiveTheme.seeds[presetIndex]),
+    'material': settings['material'] ?? 'frosted',
+    'opacity': settings['opacity'] ?? .76,
+    'wallpaperOpacity': wallpaperVisibility,
+    'customColorOpacity': customColorOpacity,
+    for (final entry in const {
+      'backgroundFit': 'cover',
+      'backgroundX': 0.0,
+      'backgroundY': 0.0,
+      'backgroundBrightness': 1.0,
+      'backgroundBlur': 0.0,
+      'backgroundOverlay': 0.0,
+      'backgroundOverlayColor': '#000000',
+      'textScale': 1.0,
+      'density': 'normal',
+      'animations': true,
+      'pauseVideoMinimized': true,
+      'pauseVideoGame': true,
+      'scheduledTheme': false,
+      'dayHour': 7,
+      'nightHour': 19,
+    }.entries)
+      entry.key: settings[entry.key] ?? entry.value,
+  };
+
+  Future<void> editPreset({int? index}) async {
+    final presets = List<dynamic>.from(settings['themePresets'] as List? ?? []);
+    if (index == null && presets.length >= 24) {
+      note(t('最多保存 24 套主题。', 'You can save up to 24 presets.'));
+      return;
+    }
+    final controller = TextEditingController(
+      text: index == null ? '' : (presets[index] as Map)['name'].toString(),
+    );
+    final name = await showDialog<String>(
+      context: navigator.currentState!.overlay!.context,
+      builder: (context) => AlertDialog(
+        title: Text(
+          index == null
+              ? t('保存主题方案', 'Save theme preset')
+              : t('重命名方案', 'Rename preset'),
+        ),
+        content: TextField(
+          controller: controller,
+          maxLength: 40,
+          autofocus: true,
+          decoration: InputDecoration(labelText: t('方案名称', 'Preset name')),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(t('取消', 'Cancel')),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text.trim()),
+            child: Text(t('保存', 'Save')),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (!mounted || name == null || name.isEmpty) return;
+    if (index == null) {
+      presets.add({
+        'name': name,
+        'appearance': {
+          ...themeOptions,
+          for (final key in [
+            'backgroundImage',
+            'backgroundVideo',
+            'backgroundVideoPreview',
+          ])
+            key: settings[key],
+        },
+      });
+    } else {
+      presets[index] = {
+        ...Map<String, dynamic>.from(presets[index] as Map),
+        'name': name,
+      };
+    }
+    await setting({'themePresets': presets});
+  }
+
+  Future<void> applyPreset(int index) async {
+    final presets = settings['themePresets'] as List? ?? [];
+    final appearance = Map<String, dynamic>.from(
+      (presets[index] as Map)['appearance'] as Map,
+    );
+    final image = appearance.remove('backgroundImage') as String?;
+    final video = appearance.remove('backgroundVideo') as String?;
+    final preview = appearance.remove('backgroundVideoPreview') as String?;
+    await setting(appearance);
+    if (video != null) {
+      await loadVideo(video, save: true);
+      if (preview != null) {
+        await loadWallpaperPreview(preview, videoPath: video);
+        await setting({'backgroundVideoPreview': preview});
+      }
+    } else {
+      await loadBackground(image, save: true);
+    }
+  }
+
+  Future<void> removePreset(int index) async {
+    final presets = List<dynamic>.from(settings['themePresets'] as List? ?? []);
+    final name = (presets[index] as Map)['name'].toString();
+    if (!await confirm(t('删除主题方案？', 'Delete theme preset?'), name)) return;
+    presets.removeAt(index);
+    if (mounted) await setting({'themePresets': presets});
+  }
+
+  Future<void> transferTheme({required bool importing}) async {
+    try {
+      const types = [
+        XTypeGroup(label: 'CPV theme', extensions: ['json']),
+      ];
+      if (importing) {
+        final file = await openFile(acceptedTypeGroups: types);
+        if (file == null || !mounted) return;
+        if (await file.length() > 64 * 1024) throw const FormatException();
+        final document = jsonDecode(await file.readAsString());
+        if (document is! Map ||
+            document['format'] != 'cpv-theme' ||
+            document['version'] != 1 ||
+            document['appearance'] is! Map) {
+          throw const FormatException();
+        }
+        final data = document['appearance'] as Map;
+        final color = data['customColor'];
+        final index = data['accent'];
+        final opacity = data['opacity'];
+        final wallpaperOpacity = data['wallpaperOpacity'];
+        final colorOpacity = data['customColorOpacity'];
+        if (!['light', 'dark', 'system'].contains(data['theme']) ||
+            !['preset', 'custom', 'wallpaper'].contains(data['colorSource']) ||
+            !ExpressiveTheme.palettes.containsKey(data['palette']) ||
+            !['frosted', 'liquid', 'solid'].contains(data['material']) ||
+            color is! String ||
+            ExpressiveTheme.parseColor(color) == null ||
+            index is! int ||
+            index < 0 ||
+            index >= ExpressiveTheme.seeds.length ||
+            opacity is! num ||
+            opacity < .2 ||
+            opacity > 1 ||
+            wallpaperOpacity is! num ||
+            wallpaperOpacity < 0 ||
+            wallpaperOpacity > 1 ||
+            colorOpacity is! num ||
+            colorOpacity < 0 ||
+            colorOpacity > 1) {
+          throw const FormatException();
+        }
+        if (mounted) {
+          await setting({
+            for (final key in themeOptions.keys)
+              if (data.containsKey(key)) key: data[key],
+            if (data['material'] == 'liquid') 'material': 'frosted',
+            'customColor': ExpressiveTheme.hex(
+              ExpressiveTheme.parseColor(color)!,
+            ),
+          });
+        }
+      } else {
+        final location = await getSaveLocation(
+          suggestedName: 'cpv-theme.json',
+          acceptedTypeGroups: types,
+        );
+        if (location == null || !mounted) return;
+        await File(location.path).writeAsString(
+          const JsonEncoder.withIndent('  ').convert({
+            'format': 'cpv-theme',
+            'version': 1,
+            'appearance': themeOptions,
+          }),
+        );
+        if (mounted) note(t('主题已导出', 'Theme exported'));
+      }
+    } catch (_) {
+      if (mounted) {
+        note(
+          importing
+              ? t(
+                  '无法导入。请选择本程序导出的主题文件。',
+                  'Import failed. Choose a theme exported by this app.',
+                )
+              : t('无法导出主题。请检查保存位置。', 'Export failed. Check the destination.'),
+        );
+      }
+    }
+  }
+
+  Future<void> chooseCustomColor() async {
+    final result = await showDialog<Color>(
+      context: navigator.currentState!.overlay!.context,
+      builder: (_) => CustomThemeColorDialog(
+        initial: (customColor ?? seed).withValues(alpha: customColorOpacity),
+        english: en,
+      ),
+    );
+    if (mounted && result != null) {
+      await setting({
+        'customColor': ExpressiveTheme.hex(result),
+        'customColorOpacity': result.a,
+        'colorSource': 'custom',
+      });
+    }
+  }
 
   Future<void> importPlans() async {
     final file = await openFile(
@@ -488,11 +1171,14 @@ class _CpvAppState extends State<CpvApp>
   }
 
   Future<void> edit(Json target) async {
+    final context = navigator.currentState!.overlay!.context;
     final result = await showGeneralDialog<Json>(
-      context: navigator.currentState!.overlay!.context,
+      context: context,
       barrierDismissible: false,
       barrierLabel: 'Editor',
-      transitionDuration: const Duration(milliseconds: 260),
+      transitionDuration: MediaQuery.disableAnimationsOf(context)
+          ? Duration.zero
+          : const Duration(milliseconds: 260),
       pageBuilder: (context, a, b) => Align(
         alignment: Alignment.centerRight,
         child: Padding(
@@ -500,6 +1186,13 @@ class _CpvAppState extends State<CpvApp>
           child: SizedBox(
             width: math.min(MediaQuery.sizeOf(context).width - 28, 780),
             child: PlanetEditor(
+              frosted:
+                  settings['material'] != 'solid' &&
+                  (backgroundImage != null || backgroundVideo != null),
+              frostOpacity:
+                  (frostPreview ??
+                          (settings['opacity'] as num? ?? .76).toDouble())
+                      .clamp(.2, 1),
               target: target,
               effects: effects,
               planets: planets,
@@ -514,15 +1207,12 @@ class _CpvAppState extends State<CpvApp>
           ),
         ),
       ),
-      transitionBuilder: (context, a, b, child) => FadeTransition(
-        opacity: a,
-        child: SlideTransition(
-          position: Tween(
-            begin: const Offset(.12, 0),
-            end: Offset.zero,
-          ).animate(CurvedAnimation(parent: a, curve: Curves.easeOutCubic)),
-          child: child,
-        ),
+      transitionBuilder: (context, a, b, child) => SlideTransition(
+        position: Tween(
+          begin: const Offset(.12, 0),
+          end: Offset.zero,
+        ).chain(CurveTween(curve: Curves.easeOutCubic)).animate(a),
+        child: child,
       ),
     );
     if (result != null) {
@@ -534,342 +1224,508 @@ class _CpvAppState extends State<CpvApp>
     }
   }
 
-  Gradient get backgroundGradient => LinearGradient(
-    begin: Alignment.topLeft,
-    end: Alignment.bottomRight,
-    colors: dark
-        ? [
-            const Color(0xff171523),
-            const Color(0xff232032),
-            const Color(0xff18252a),
-          ]
-        : [
-            const Color(0xfff6f4fb),
-            const Color(0xffe9e3f3),
-            const Color(0xffeef3ef),
-          ],
-  );
+  late ThemeData appTheme;
+  (Color, Brightness, String)? themeInputs;
 
   Widget glass(Widget child, {EdgeInsets padding = const EdgeInsets.all(24)}) {
-    final opacity = (settings['opacity'] as num? ?? .76).toDouble();
-    final liquid = settings['material'] == 'liquid';
-    final solid = settings['material'] == 'solid';
-    final tint = dark ? const Color(0xff22232d) : Colors.white;
-    final radius = BorderRadius.circular(24);
-    return LiquidGlassSurface(
-      backgroundGradient: backgroundGradient,
-      backgroundImage: backgroundImage,
-      backgroundImageOpacity: backgroundImageOpacity,
-      tint: tint,
-      dark: dark,
+    final opacity =
+        frostPreview ?? (settings['opacity'] as num? ?? .76).toDouble();
+    final tint = appTheme.colorScheme.surfaceContainer;
+    final radius = BorderRadius.circular(ExpressiveTheme.panelRadius);
+    if (settings['material'] == 'solid' ||
+        (backgroundImage == null && backgroundVideo == null) ||
+        backgroundImageOpacity == 0 ||
+        opacity == 1) {
+      return Material(
+        color: tint,
+        borderRadius: radius,
+        child: Padding(padding: padding, child: child),
+      );
+    }
+    return ClipRRect(
       borderRadius: radius,
-      transparentCanvas: false,
-      material: liquid
-          ? GlassMaterial.liquid(
-              tint: tint,
-              dark: dark,
-              readable: false,
-              borderRadius: radius,
-            )
-          : GlassMaterial(
-              blur: solid ? 0 : 14,
-              liquid: 0,
-              decoration: BoxDecoration(
-                color: tint.withValues(alpha: solid ? 1 : opacity),
-                borderRadius: radius,
-                border: Border.all(
-                  color: (dark ? Colors.white : Colors.white).withValues(
-                    alpha: .30,
-                  ),
+      child: BackdropFilter.grouped(
+        filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+        child: Material(
+          color: tint.withValues(alpha: opacity),
+          child: Padding(padding: padding, child: child),
+        ),
+      ),
+    );
+  }
+
+  Widget backgroundLayer() {
+    final fit = switch (settings['backgroundFit']) {
+      'contain' => BoxFit.contain,
+      'fill' => BoxFit.fill,
+      _ => BoxFit.cover,
+    };
+    final alignment = Alignment(
+      (settings['backgroundX'] as num? ?? 0).toDouble().clamp(-1, 1),
+      (settings['backgroundY'] as num? ?? 0).toDouble().clamp(-1, 1),
+    );
+    final brightness = (settings['backgroundBrightness'] as num? ?? 1)
+        .toDouble();
+    final blur = (settings['backgroundBlur'] as num? ?? 0).toDouble();
+    final overlay = (settings['backgroundOverlay'] as num? ?? 0).toDouble();
+    final overlayColor =
+        ExpressiveTheme.parseColor(
+          settings['backgroundOverlayColor'] as String? ?? '#000000',
+        ) ??
+        Colors.black;
+    Widget media(WinVideoPlayerController? video, ui.Image? image) {
+      Widget result = video != null
+          ? ClipRect(
+              child: FittedBox(
+                fit: fit,
+                alignment: alignment,
+                child: SizedBox.fromSize(
+                  size: video.value.size,
+                  child: WinVideoPlayer(video),
                 ),
               ),
+            )
+          : RawImage(image: image, fit: fit, alignment: alignment);
+      if (brightness != 1) {
+        result = ColorFiltered(
+          colorFilter: ColorFilter.matrix([
+            brightness,
+            0,
+            0,
+            0,
+            0,
+            0,
+            brightness,
+            0,
+            0,
+            0,
+            0,
+            0,
+            brightness,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+          ]),
+          child: result,
+        );
+      }
+      if (blur > 0) {
+        result = ImageFiltered(
+          imageFilter: ui.ImageFilter.blur(sigmaX: blur, sigmaY: blur),
+          child: result,
+        );
+      }
+      return result;
+    }
+
+    Widget layer(WinVideoPlayerController? video, ui.Image? image) => Stack(
+      fit: StackFit.expand,
+      children: [
+        ColoredBox(color: appTheme.colorScheme.surface),
+        if (video != null || image != null)
+          Opacity(opacity: backgroundImageOpacity, child: media(video, image)),
+        if (overlay > 0 && (video != null || image != null))
+          ColoredBox(color: overlayColor.withValues(alpha: overlay)),
+      ],
+    );
+    return IgnorePointer(
+      child: Stack(
+        fit: StackFit.expand,
+        children: [
+          layer(backgroundVideo, backgroundImage),
+          if (wallpaperTransitionActive)
+            AnimatedBuilder(
+              animation: wallpaperReveal,
+              builder: (context, child) => ClipPath(
+                key: const ValueKey('wallpaper-reveal'),
+                clipper: ThemeRevealClipper(
+                  wallpaperOrigin,
+                  Curves.easeInOutCubic.transform(wallpaperReveal.value),
+                ),
+                child: child,
+              ),
+              child: layer(outgoingVideo, outgoingWallpaper),
             ),
-      child: Padding(padding: padding, child: child),
+        ],
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = ColorScheme.fromSeed(
-      seedColor: accent,
-      brightness: dark ? Brightness.dark : Brightness.light,
-    );
+    final inputs = (seed, dark ? Brightness.dark : Brightness.light, palette);
+    if (themeInputs != inputs) {
+      themeInputs = inputs;
+      appTheme = ExpressiveTheme.build(inputs.$1, inputs.$2, inputs.$3);
+    }
+    final density = switch (settings['density']) {
+      'compact' => VisualDensity.compact,
+      'comfortable' => const VisualDensity(horizontal: 2, vertical: 2),
+      _ => VisualDensity.standard,
+    };
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      themeAnimationDuration: Duration.zero,
       scaffoldMessengerKey: messenger,
       navigatorKey: navigator,
       title: title,
       locale: Locale(en ? 'en' : 'zh'),
       supportedLocales: const [Locale('zh'), Locale('en')],
       localizationsDelegates: GlobalMaterialLocalizations.delegates,
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: colorScheme,
-        scaffoldBackgroundColor: Colors.transparent,
-        fontFamily: 'Microsoft YaHei UI',
-        textTheme: ThemeData(
-          brightness: dark ? Brightness.dark : Brightness.light,
-        ).textTheme.apply(fontFamily: 'Microsoft YaHei UI'),
-        inputDecorationTheme: InputDecorationTheme(
-          filled: true,
-          fillColor: colorScheme.surface.withValues(alpha: .72),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: BorderSide.none,
-          ),
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 16,
-            vertical: 16,
+      theme: appTheme.copyWith(visualDensity: density),
+      builder: (context, child) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(
+          disableAnimations:
+              MediaQuery.disableAnimationsOf(context) ||
+              settings['animations'] == false,
+          textScaler: TextScaler.linear(
+            (settings['textScale'] as num? ?? 1).toDouble().clamp(.85, 1.3),
           ),
         ),
-        filledButtonTheme: FilledButtonThemeData(
-          style: FilledButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 18),
-          ),
-        ),
-        outlinedButtonTheme: OutlinedButtonThemeData(
-          style: OutlinedButton.styleFrom(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 17),
-          ),
-        ),
-        dividerColor: colorScheme.outlineVariant.withValues(alpha: .3),
+        child: child ?? const SizedBox.shrink(),
       ),
       home: Builder(
         builder: (context) => Scaffold(
-          body: DecoratedBox(
-            decoration: BoxDecoration(gradient: backgroundGradient),
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                if (backgroundImage != null)
-                  IgnorePointer(
-                    child: RawImage(
-                      image: backgroundImage,
-                      fit: BoxFit.cover,
-                      opacity: AlwaysStoppedAnimation(backgroundImageOpacity),
-                    ),
+          body: Stack(
+            fit: StackFit.expand,
+            children: [
+              RepaintBoundary(
+                key: workspace,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: appTheme.colorScheme.surface,
                   ),
-                SafeArea(
-                  child: LayoutBuilder(
-                    builder: (context, box) {
-                      final wide = box.maxWidth >= 960;
-                      return Padding(
-                        padding: EdgeInsets.all(wide ? 22 : 12),
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            SizedBox(
-                              width: wide ? 216 : 78,
-                              child: sidebar(wide),
-                            ),
-                            SizedBox(width: wide ? 24 : 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  topbar(),
-                                  const SizedBox(height: 22),
-                                  Expanded(
-                                    child: AnimatedSwitcher(
-                                      duration: const Duration(
-                                        milliseconds: 220,
-                                      ),
-                                      child: KeyedSubtree(
-                                        key: ValueKey(page),
-                                        child: switch (page) {
-                                          0 => plansPage(),
-                                          1 => catalogPage(),
-                                          2 => connectionPage(),
-                                          4 => inventoryPage(),
-                                          _ => settingsPage(),
-                                        },
+                  child: BackdropGroup(
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        backgroundLayer(),
+                        SafeArea(
+                          child: LayoutBuilder(
+                            builder: (context, box) {
+                              final wide = stableWideLayout(
+                                box.maxWidth,
+                                wideLayout,
+                              );
+                              wideLayout = wide;
+                              final expandedSidebar =
+                                  wide && settings['sidebarCollapsed'] != true;
+                              return Padding(
+                                padding: EdgeInsets.all(wide ? 22 : 12),
+                                child: Row(
+                                  crossAxisAlignment:
+                                      CrossAxisAlignment.stretch,
+                                  children: [
+                                    SizedBox(
+                                      width: expandedSidebar ? 232 : 76,
+                                      child: sidebar(
+                                        expandedSidebar,
+                                        canToggle: wide,
                                       ),
                                     ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ],
+                                    SizedBox(width: wide ? 24 : 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.stretch,
+                                        children: [
+                                          topbar(),
+                                          const SizedBox(height: 22),
+                                          Expanded(
+                                            child: AnimatedSwitcher(
+                                              layoutBuilder:
+                                                  (current, previous) =>
+                                                      current ??
+                                                      const SizedBox.shrink(),
+                                              duration:
+                                                  settings['animations'] ==
+                                                          false ||
+                                                      MediaQuery.disableAnimationsOf(
+                                                        context,
+                                                      )
+                                                  ? Duration.zero
+                                                  : const Duration(
+                                                      milliseconds: 300,
+                                                    ),
+                                              switchInCurve:
+                                                  Curves.easeOutCubic,
+                                              switchOutCurve:
+                                                  Curves.easeInCubic,
+                                              transitionBuilder:
+                                                  (child, animation) =>
+                                                      SlideTransition(
+                                                        position: Tween<Offset>(
+                                                          begin: const Offset(
+                                                            0,
+                                                            .02,
+                                                          ),
+                                                          end: Offset.zero,
+                                                        ).animate(animation),
+                                                        child: child,
+                                                      ),
+                                              child: KeyedSubtree(
+                                                key: ValueKey(page),
+                                                child: switch (page) {
+                                                  0 => plansPage(),
+                                                  1 => catalogPage(),
+                                                  2 => connectionPage(),
+                                                  4 => inventoryPage(),
+                                                  _ => settingsPage(),
+                                                },
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
                         ),
-                      );
-                    },
-                  ),
-                ),
-                if (widget.nativeWindow && Platform.isWindows)
-                  Positioned(
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    height: MediaQuery.sizeOf(context).width >= 960 ? 22 : 12,
-                    child: windowDrag(
-                      const SizedBox.expand(),
-                      key: const ValueKey('window-top-drag-zone'),
+                        if (widget.nativeWindow && Platform.isWindows)
+                          Positioned(
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            height: MediaQuery.sizeOf(context).width >= 960
+                                ? 22
+                                : 12,
+                            child: windowDrag(
+                              const SizedBox.expand(),
+                              key: const ValueKey('window-top-drag-zone'),
+                            ),
+                          ),
+                      ],
                     ),
                   ),
-              ],
-            ),
+                ),
+              ),
+              if (previousTheme case final image?)
+                IgnorePointer(
+                  child: ExcludeSemantics(
+                    child: AnimatedBuilder(
+                      animation: themeReveal,
+                      builder: (context, child) => ClipPath(
+                        key: const ValueKey('appearance-reveal'),
+                        clipper: ThemeRevealClipper(
+                          revealOrigin,
+                          Curves.easeInOutCubic.transform(themeReveal.value),
+                        ),
+                        child: child,
+                      ),
+                      child: RawImage(image: image, fit: BoxFit.fill),
+                    ),
+                  ),
+                ),
+            ],
           ),
         ),
       ),
     );
   }
 
-  Widget sidebar(bool wide) {
-    final labels = [
-      t('星球方案', 'Planet plans'),
-      t('效果列表', 'Effect library'),
-      t('连接游戏', 'Connect game'),
-      t('软件设置', 'App settings'),
-      t('军械库', 'Armory'),
-    ];
-    final hints = [
-      t(
-        '选择星球，设置敌人、作战和附加效果。',
-        'Choose a planet, its enemies, operations and effects.',
+  Widget sidebar(bool wide, {required bool canToggle}) {
+    final colors = appTheme.colorScheme;
+    final destinations = [
+      (t('星球方案', 'Planet plans'), Icons.dashboard_outlined, Icons.dashboard),
+      (
+        t('效果列表', 'Effect library'),
+        Icons.auto_awesome_mosaic_outlined,
+        Icons.auto_awesome_mosaic,
       ),
-      t(
-        '查找变种、天气、临时战备等效果，点击条目查看说明。',
-        'Browse variants, weather and temporary stratagems. Open an entry for details.',
-      ),
-      t(
-        '完成首次连接设置，启动代理并从 Steam 进入游戏。',
-        'Set up the connection, start the proxy and launch the game through Steam.',
-      ),
-      t(
-        '调整外观和语言，检查更新或导出问题日志。',
-        'Change appearance and language, check updates or export troubleshooting logs.',
-      ),
-      t(
-        '选择要在游戏中预览的武器和投掷物，设置配件替换。',
-        'Choose weapons and throwables to preview, or replace attachments.',
-      ),
-    ];
-    final icons = [
-      Icons.dashboard_outlined,
-      Icons.auto_awesome_mosaic_outlined,
-      Icons.cable_rounded,
-      Icons.tune_rounded,
-      Icons.inventory_2_outlined,
+      (t('连接游戏', 'Connect game'), Icons.cable_rounded, Icons.cable),
+      (t('软件设置', 'App settings'), Icons.tune_rounded, Icons.tune),
+      (t('军械库', 'Armory'), Icons.inventory_2_outlined, Icons.inventory_2),
     ];
     return glass(
-      Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          windowDrag(
+      Padding(
+        padding: EdgeInsets.all(wide ? 12 : 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
             Row(
               children: [
-                Image.asset(
-                  'assets/cpv.png',
-                  width: wide ? 42 : 36,
-                  height: 42,
+                Expanded(
+                  child: windowDrag(
+                    Row(
+                      mainAxisAlignment: wide
+                          ? MainAxisAlignment.start
+                          : MainAxisAlignment.center,
+                      children: [
+                        Image.asset('assets/cpv.png', width: 32, height: 32),
+                        if (wide) ...[
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: BrandTitle(
+                              text: title,
+                              style: appTheme.textTheme.titleSmall,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    height: 48,
+                    key: const ValueKey('window-logo-drag-zone'),
+                  ),
+                ),
+                if (canToggle && wide)
+                  IconButton(
+                    tooltip: t('收起侧边栏', 'Collapse sidebar'),
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.menu_open, size: 20),
+                    onPressed: () => setting({'sidebarCollapsed': true}),
+                  ),
+              ],
+            ),
+            if (canToggle && !wide)
+              Align(
+                alignment: Alignment.center,
+                child: IconButton(
+                  tooltip: t('展开侧边栏', 'Expand sidebar'),
+                  icon: const Icon(Icons.menu, size: 20),
+                  onPressed: () => setting({'sidebarCollapsed': false}),
+                ),
+              ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: ListView(
+                padding: EdgeInsets.zero,
+                children: [
+                  for (final index in [0, 1, 4, 2, 3])
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Builder(
+                        builder: (context) {
+                          final (label, icon, selectedIcon) =
+                              destinations[index];
+                          final selected = index == page;
+                          final shape = RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(
+                              selected ? 28 : 14,
+                            ),
+                          );
+                          return Semantics(
+                            selected: selected,
+                            child: AnimatedPhysicalModel(
+                              duration: MediaQuery.disableAnimationsOf(context)
+                                  ? Duration.zero
+                                  : const Duration(milliseconds: 220),
+                              curve: Curves.easeOutCubic,
+                              shape: BoxShape.rectangle,
+                              borderRadius: shape.borderRadius.resolve(
+                                Directionality.of(context),
+                              ),
+                              clipBehavior: Clip.antiAlias,
+                              elevation: 0,
+                              shadowColor: Colors.transparent,
+                              color: selected
+                                  ? colors.secondaryContainer
+                                  : Colors.transparent,
+                              child: Material(
+                                color: Colors.transparent,
+                                child: Tooltip(
+                                  message: label,
+                                  excludeFromSemantics: wide,
+                                  child: ListTile(
+                                    contentPadding: EdgeInsets.symmetric(
+                                      horizontal: wide ? 12 : 0,
+                                    ),
+                                    minTileHeight: 48,
+                                    minLeadingWidth: 22,
+                                    title: wide
+                                        ? Text(label)
+                                        : Icon(selected ? selectedIcon : icon),
+                                    leading: wide
+                                        ? Icon(selected ? selectedIcon : icon)
+                                        : null,
+                                    selected: selected,
+                                    selectedColor: colors.onSecondaryContainer,
+                                    textColor: colors.onSurfaceVariant,
+                                    iconColor: colors.onSurfaceVariant,
+                                    titleTextStyle: appTheme
+                                        .textTheme
+                                        .labelLarge
+                                        ?.copyWith(
+                                          fontWeight: selected
+                                              ? FontWeight.w800
+                                              : FontWeight.w500,
+                                        ),
+                                    onTap: () {
+                                      if (page == index) return;
+                                      setState(() {
+                                        page = index;
+                                        query = '';
+                                      });
+                                    },
+                                  ),
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            const Divider(height: 16),
+            Flex(
+              direction: wide ? Axis.horizontal : Axis.vertical,
+              mainAxisAlignment: wide
+                  ? MainAxisAlignment.start
+                  : MainAxisAlignment.center,
+              children: [
+                Tooltip(
+                  message: dark
+                      ? t('切换浅色模式', 'Use light mode')
+                      : t('切换深色模式', 'Use dark mode'),
+                  child: IconButton(
+                    key: themeToggle,
+                    icon: Icon(
+                      dark
+                          ? Icons.light_mode_outlined
+                          : Icons.dark_mode_outlined,
+                    ),
+                    onPressed: () => changeTheme(
+                      dark ? 'light' : 'dark',
+                      trigger: themeToggle,
+                    ),
+                  ),
+                ),
+                Tooltip(
+                  message: t('切换语言', 'Switch language'),
+                  child: IconButton(
+                    onPressed: () => setting({'language': en ? 'zh' : 'en'}),
+                    icon: Text(
+                      en ? '中' : 'EN',
+                      style: appTheme.textTheme.labelLarge,
+                    ),
+                  ),
                 ),
                 if (wide) ...[
-                  const SizedBox(width: 10),
-                  Expanded(
+                  const Spacer(),
+                  Padding(
+                    padding: const EdgeInsets.only(right: 8),
                     child: Text(
-                      title,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w700,
+                      'v$currentVersion',
+                      style: appTheme.textTheme.labelSmall?.copyWith(
+                        color: colors.onSurfaceVariant,
                       ),
                     ),
                   ),
                 ],
               ],
             ),
-            height: 42,
-            key: const ValueKey('window-logo-drag-zone'),
-          ),
-          if (wide) ...[
-            const SizedBox(height: 12),
-
-            const SizedBox(height: 6),
-            Text(
-              currentVersion.isEmpty ? '—' : currentVersion,
-              style: const TextStyle(fontSize: 10, letterSpacing: 1.8),
-            ),
           ],
-          const SizedBox(height: 34),
-          for (var i = 0; i < labels.length; i++)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Tooltip(
-                message: '${labels[i]}\n${hints[i]}',
-                child: Material(
-                  color: page == i
-                      ? accent.withValues(alpha: .17)
-                      : Colors.transparent,
-                  borderRadius: BorderRadius.circular(14),
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(14),
-                    onTap: () => setState(() {
-                      page = i;
-                      query = '';
-                    }),
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: wide ? 14 : 8,
-                        vertical: 17,
-                      ),
-                      child: Row(
-                        mainAxisAlignment: wide
-                            ? MainAxisAlignment.start
-                            : MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            icons[i],
-                            size: 22,
-                            color: page == i ? accent : null,
-                          ),
-                          if (wide) ...[
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                labels[i],
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontWeight: page == i
-                                      ? FontWeight.w600
-                                      : FontWeight.normal,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          const Spacer(),
-          if (wide)
-            Container(
-              padding: const EdgeInsets.all(14),
-              decoration: BoxDecoration(
-                color: accent.withValues(alpha: .08),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Text(
-                t(
-                  '选择星球，组合效果。\n保留自己的游玩方案。',
-                  'Choose a planet.\nMake it your own.',
-                ),
-                style: const TextStyle(fontSize: 12, height: 1.8),
-              ),
-            ),
-          const SizedBox(height: 16),
-          Tooltip(
-            message: t('切换语言', 'Switch language'),
-            child: TextButton(
-              onPressed: () => setting({'language': en ? 'zh' : 'en'}),
-              child: Text(en ? '中' : 'EN'),
-            ),
-          ),
-        ],
+        ),
       ),
-      padding: EdgeInsets.all(wide ? 18 : 10),
+      padding: EdgeInsets.zero,
     );
   }
 
@@ -954,46 +1810,65 @@ class _CpvAppState extends State<CpvApp>
           ),
         )
       : child;
-  Widget heading(String title, String subtitle, List<Widget> actions) =>
-      LayoutBuilder(
-        builder: (context, c) => Wrap(
-          spacing: 18,
-          runSpacing: 16,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            SizedBox(
-              width: math.max(180, c.maxWidth - 400),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+  Widget heading(String title, String subtitle, List<Widget> actions) {
+    final colors = appTheme.colorScheme;
+    return Material(
+      color: colors.surfaceContainerLow.withValues(alpha: .94),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: colors.outlineVariant.withValues(alpha: .45)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 16),
+        child: LayoutBuilder(
+          builder: (context, bounds) {
+            final titleBlock = Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  title,
+                  style: appTheme.textTheme.headlineSmall?.copyWith(
+                    color: colors.onSurface,
+                    fontWeight: FontWeight.w700,
+                    height: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  subtitle,
+                  style: appTheme.textTheme.bodyMedium?.copyWith(
+                    color: colors.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            );
+            if (actions.isEmpty) return titleBlock;
+            final toolbar = Wrap(spacing: 6, runSpacing: 6, children: actions);
+            if (bounds.maxWidth >= 550) {
+              return Row(
                 children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      fontSize: 30,
-                      fontWeight: FontWeight.w700,
-                      letterSpacing: -.5,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    subtitle,
-                    style: TextStyle(
-                      color: dark ? Colors.white60 : Colors.black54,
-                      height: 1.5,
-                    ),
-                  ),
+                  Expanded(child: titleBlock),
+                  const SizedBox(width: 18),
+                  toolbar,
                 ],
-              ),
-            ),
-            ...actions,
-          ],
+              );
+            }
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [titleBlock, const SizedBox(height: 12), toolbar],
+            );
+          },
         ),
-      );
+      ),
+    );
+  }
+
   Widget plansPage() => Column(
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       heading(
-        t('让每次出发，都不一样。', 'A different world. Every drop.'),
+        t('星球方案', 'Planet plans'),
         t(
           '保存星球、作战与效果的组合。',
           'Your planets, operations and effects — in one place.',
@@ -1033,23 +1908,29 @@ class _CpvAppState extends State<CpvApp>
         child: targets.isEmpty
             ? emptyPlans()
             : LayoutBuilder(
-                builder: (context, c) => GridView.builder(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                    crossAxisCount: c.maxWidth >= 900
-                        ? 4
-                        : c.maxWidth >= 660
-                        ? 3
-                        : c.maxWidth >= 420
-                        ? 2
-                        : 1,
-                    mainAxisExtent: 224,
-                    crossAxisSpacing: 14,
-                    mainAxisSpacing: 14,
-                  ),
-                  itemCount: targets.length,
-                  itemBuilder: (context, i) => planetCard(targets[i]),
-                ),
+                builder: (context, c) {
+                  final columns = stablePlanColumns(c.maxWidth, planColumns);
+                  planColumns = columns;
+                  return GridView.builder(
+                    padding: const EdgeInsets.only(bottom: 16),
+                    gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: columns,
+                      mainAxisExtent: 224,
+                      crossAxisSpacing: settings['density'] == 'compact'
+                          ? 8
+                          : settings['density'] == 'comfortable'
+                          ? 20
+                          : 14,
+                      mainAxisSpacing: settings['density'] == 'compact'
+                          ? 8
+                          : settings['density'] == 'comfortable'
+                          ? 20
+                          : 14,
+                    ),
+                    itemCount: targets.length,
+                    itemBuilder: (context, i) => planetCard(targets[i]),
+                  );
+                },
               ),
       ),
     ],
@@ -1106,120 +1987,123 @@ class _CpvAppState extends State<CpvApp>
             _ => t('自定义作战', 'Custom operations'),
           }
         : t('沿用游戏作战', 'Current game operations');
-    return glass(
-      Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: accent.withValues(alpha: .12),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Icon(Icons.public_rounded, color: accent, size: 18),
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: appTheme.colorScheme.tertiaryContainer,
+                borderRadius: BorderRadius.circular(16),
               ),
-              const Spacer(),
-              Switch(
-                value: target['enabled'] == true,
-                onChanged: working
-                    ? null
-                    : (value) async {
-                        final data = await action('save_target', {
-                          'target': {...target, 'enabled': value},
-                        });
-                        if (data is List && mounted) {
-                          setState(() => targets = rows(data));
-                        }
-                      },
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          Tooltip(
-            message: planetName(target['planet']),
-            child: Text(
-              planetName(target['planet']),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '#${target['planet']} · ${ids.length} ${t('个效果', 'effects')}',
-            style: const TextStyle(fontSize: 12),
-          ),
-          const SizedBox(height: 6),
-          Tooltip(
-            message: summary,
-            child: Text(
-              summary,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 12,
-                color: dark ? Colors.white60 : Colors.black54,
+              child: Icon(
+                Icons.public_rounded,
+                color: appTheme.colorScheme.onTertiaryContainer,
+                size: 22,
               ),
             ),
+            const Spacer(),
+            Switch(
+              value: target['enabled'] == true,
+              onChanged: working
+                  ? null
+                  : (value) async {
+                      final data = await action('save_target', {
+                        'target': {...target, 'enabled': value},
+                      });
+                      if (data is List && mounted) {
+                        setState(() => targets = rows(data));
+                      }
+                    },
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Tooltip(
+          message: planetName(target['planet']),
+          child: Text(
+            planetName(target['planet']),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
           ),
-          const Spacer(),
-          Row(
-            children: [
-              Expanded(
-                child: Tooltip(
-                  message: operation,
-                  child: Text(
-                    operation,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11),
-                  ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          '#${target['planet']} · ${ids.length} ${t('个效果', 'effects')}',
+          style: const TextStyle(fontSize: 12),
+        ),
+        const SizedBox(height: 6),
+        Tooltip(
+          message: summary,
+          child: Text(
+            summary,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 12,
+              color: appTheme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ),
+        const Spacer(),
+        Row(
+          children: [
+            Expanded(
+              child: Tooltip(
+                message: operation,
+                child: Text(
+                  operation,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11),
                 ),
               ),
-              IconButton(
-                tooltip: t('删除方案', 'Remove plan'),
-                visualDensity: VisualDensity.compact,
-                onPressed: working
-                    ? null
-                    : () async {
-                        if (!await confirm(
-                          t('删除此星球方案？', 'Remove this planet plan?'),
-                          t(
-                            '只移除本地方案。',
-                            'Only this local plan will be removed.',
-                          ),
-                        )) {
-                          return;
-                        }
-                        final data = await action('remove_target', {
-                          'planet': target['planet'],
-                        });
-                        if (data is List && mounted) {
-                          setState(() => targets = rows(data));
-                        }
-                      },
-                icon: const Icon(Icons.delete_outline, size: 17),
-              ),
-              const SizedBox(width: 4),
-              FilledButton.tonal(
-                onPressed: () => edit(target),
-                style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 10,
-                  ),
-                  minimumSize: const Size(60, 36),
-                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            IconButton(
+              tooltip: t('删除方案', 'Remove plan'),
+              visualDensity: VisualDensity.compact,
+              onPressed: working
+                  ? null
+                  : () async {
+                      if (!await confirm(
+                        t('删除此星球方案？', 'Remove this planet plan?'),
+                        t('只移除本地方案。', 'Only this local plan will be removed.'),
+                      )) {
+                        return;
+                      }
+                      final data = await action('remove_target', {
+                        'planet': target['planet'],
+                      });
+                      if (data is List && mounted) {
+                        setState(() => targets = rows(data));
+                      }
+                    },
+              icon: const Icon(Icons.delete_outline, size: 17),
+            ),
+            const SizedBox(width: 4),
+            FilledButton.tonal(
+              onPressed: () => edit(target),
+              style: FilledButton.styleFrom(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 10,
                 ),
-                child: Text(t('编辑', 'Edit')),
+                minimumSize: const Size(60, 36),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
-            ],
-          ),
-        ],
-      ),
-      padding: const EdgeInsets.all(16),
+              child: Text(t('编辑', 'Edit')),
+            ),
+          ],
+        ),
+      ],
+    );
+    const padding = EdgeInsets.all(16);
+    return MotionCard(
+      key: ValueKey('planet-motion-${target['planet']}'),
+      child: glass(content, padding: padding),
     );
   }
 
@@ -1295,11 +2179,20 @@ class _CpvAppState extends State<CpvApp>
         ),
       ) ??
       false;
+  String get connectionStatus {
+    final status = state['status']?.toString() ?? '';
+    final separator = status.indexOf(' / ');
+    if (separator < 0) return status;
+    return en
+        ? status.substring(separator + 3)
+        : status.substring(0, separator);
+  }
+
   Widget connectionPage() => ListView(
     padding: const EdgeInsets.only(bottom: 24),
     children: [
       heading(
-        t('保持连接，轻松出发。', 'Ready when you are.'),
+        t('连接游戏', 'Connect game'),
         t(
           '仅处理必要的游戏 API，登录与反作弊连接不解密。',
           'Only the required game API is intercepted. Login and anti-cheat remain outside decryption.',
@@ -1332,7 +2225,7 @@ class _CpvAppState extends State<CpvApp>
               ],
             ),
             const SizedBox(height: 16),
-            SelectableText(state['status']?.toString() ?? ''),
+            SelectableText(connectionStatus),
             const SizedBox(height: 18),
             Wrap(
               spacing: 12,
@@ -1738,13 +2631,136 @@ class _CpvAppState extends State<CpvApp>
     english: en,
     proxyState: state,
     surface: (child) => glass(child),
+    heading: heading,
   );
 
-  Widget settingsPage() => ListView(
+  Widget paletteSwatch(String key) {
+    final colors = ColorScheme.fromSeed(
+      seedColor: seed,
+      brightness: appTheme.brightness,
+      dynamicSchemeVariant: ExpressiveTheme.palettes[key]!,
+    );
+    return ClipOval(
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ColoredBox(
+            color: colors.primary,
+            child: const SizedBox(width: 9, height: 18),
+          ),
+          ColoredBox(
+            color: colors.tertiary,
+            child: const SizedBox(width: 9, height: 18),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget settingsPage() => LayoutBuilder(
+    builder: (context, constraints) {
+      final categories = [
+        (t('语言与外观', 'Language & appearance'), Icons.palette_outlined),
+        (t('背景与视频', 'Background & video'), Icons.wallpaper_outlined),
+        (t('界面与动画', 'Interface & motion'), Icons.tune),
+        (t('主题方案', 'Theme presets'), Icons.bookmarks_outlined),
+        (t('诊断与日志', 'Diagnostics & logs'), Icons.monitor_heart_outlined),
+        (t('关于与更新', 'About & updates'), Icons.info_outline),
+      ];
+      Widget item(int index) {
+        final selected = settingsCategory == index;
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 4),
+          child: Material(
+            color: selected
+                ? appTheme.colorScheme.secondaryContainer
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(10),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(10),
+              onTap: () => setState(() => settingsCategory = index),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 14,
+                  vertical: 13,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      categories[index].$2,
+                      size: 20,
+                      color: selected
+                          ? appTheme.colorScheme.onSecondaryContainer
+                          : appTheme.colorScheme.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      categories[index].$1,
+                      style: TextStyle(
+                        color: selected
+                            ? appTheme.colorScheme.onSecondaryContainer
+                            : appTheme.colorScheme.onSurfaceVariant,
+                        fontWeight: selected
+                            ? FontWeight.w600
+                            : FontWeight.normal,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      }
+
+      final navigation = [for (var i = 0; i < categories.length; i++) item(i)];
+      if (constraints.maxWidth < 700) {
+        return Column(
+          children: [
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(children: navigation),
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: MotionEntrance(
+                key: ValueKey('settings-motion-$settingsCategory'),
+                child: settingsContents(),
+              ),
+            ),
+          ],
+        );
+      }
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(width: 210, child: ListView(children: navigation)),
+          const SizedBox(width: 24),
+          Expanded(
+            child: MotionEntrance(
+              key: ValueKey('settings-motion-$settingsCategory'),
+              child: settingsContents(),
+            ),
+          ),
+        ],
+      );
+    },
+  );
+
+  Widget settingsContents() => ListView(
+    key: ValueKey('settings-category-$settingsCategory'),
     padding: const EdgeInsets.only(bottom: 24),
     children: [
       heading(
-        t('你的空间，你的风格。', 'A space that feels like you.'),
+        [
+          t('语言与外观', 'Language & appearance'),
+          t('背景与视频', 'Background & video'),
+          t('界面与动画', 'Interface & motion'),
+          t('主题方案', 'Theme presets'),
+          t('诊断与日志', 'Diagnostics & logs'),
+          t('关于与更新', 'About & updates'),
+        ][settingsCategory],
         t(
           '调整立即生效，并在下次启动时保留。',
           'Changes apply immediately and persist across launches.',
@@ -1752,313 +2768,631 @@ class _CpvAppState extends State<CpvApp>
         [],
       ),
       const SizedBox(height: 24),
-      glass(
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              t('外观', 'Appearance'),
-              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 18),
-            settingRow(
-              t('颜色模式', 'Color mode'),
-              t('浅色、深色或跟随系统', 'Light, dark or follow the system'),
-              DropdownButton<String>(
-                value: settings['theme'] ?? 'light',
-                items: [
-                  for (final v in ['light', 'dark', 'system'])
-                    DropdownMenuItem(
-                      value: v,
-                      child: Text(
-                        v == 'light'
-                            ? t('浅色', 'Light')
-                            : v == 'dark'
-                            ? t('深色', 'Dark')
-                            : t('跟随系统', 'System'),
-                      ),
-                    ),
-                ],
-                onChanged: (v) => setting({'theme': v}),
-              ),
-            ),
-            const Divider(height: 32),
-            settingRow(
-              t('主题颜色', 'Theme color'),
-              t('改变按钮和选中项的颜色', 'Changes the color of buttons and selections'),
-              Wrap(
-                spacing: 10,
-                children: [
-                  for (int i = 0; i < 4; i++)
-                    InkWell(
-                      onTap: () => setting({'accent': i}),
-                      borderRadius: BorderRadius.circular(30),
-                      child: Container(
-                        width: 32,
-                        height: 32,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: [
-                            const Color(0xff8270b2),
-                            const Color(0xff6d9a8b),
-                            const Color(0xffb28e73),
-                            const Color(0xff7897c1),
-                          ][i],
+      if (settingsCategory == 0 || settingsCategory == 1)
+        glass(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (settingsCategory == 0) ...[
+                Text(
+                  t('外观', 'Appearance'),
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 18),
+                settingRow(
+                  t('颜色模式', 'Color mode'),
+                  t('浅色、深色或跟随系统', 'Light, dark or follow the system'),
+                  DropdownButton<String>(
+                    key: themeControl,
+                    value: settings['theme'] ?? 'light',
+                    items: [
+                      for (final v in ['light', 'dark', 'system'])
+                        DropdownMenuItem(
+                          value: v,
+                          child: Text(
+                            v == 'light'
+                                ? t('浅色', 'Light')
+                                : v == 'dark'
+                                ? t('深色', 'Dark')
+                                : t('跟随系统', 'System'),
+                          ),
                         ),
-                        child: settings['accent'] == i
-                            ? const Icon(
-                                Icons.check,
-                                color: Colors.white,
-                                size: 18,
-                              )
-                            : null,
+                    ],
+                    onChanged: changeTheme,
+                  ),
+                ),
+                const Divider(height: 32),
+                settingRow(
+                  t('取色来源', 'Color source'),
+                  t(
+                    '从预设、自定义颜色或当前背景生成配色。',
+                    'Generate colors from a preset, a custom color or the current background.',
+                  ),
+                  DropdownButton<String>(
+                    value: colorSource,
+                    items: [
+                      DropdownMenuItem(
+                        value: 'preset',
+                        child: Text(t('预设色', 'Preset')),
+                      ),
+                      DropdownMenuItem(
+                        value: 'custom',
+                        child: Text(t('自定义色', 'Custom')),
+                      ),
+                      DropdownMenuItem(
+                        value: 'wallpaper',
+                        child: Text(t('背景取色', 'From background')),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value != null) setting({'colorSource': value});
+                    },
+                  ),
+                ),
+                const SizedBox(height: 12),
+                if (colorSource == 'preset')
+                  Wrap(
+                    spacing: 8,
+                    children: [
+                      for (var i = 0; i < ExpressiveTheme.seeds.length; i++)
+                        ChoiceChip(
+                          label: Text(
+                            [
+                              t('紫', 'Violet'),
+                              t('绿', 'Green'),
+                              t('棕', 'Brown'),
+                              t('蓝', 'Blue'),
+                            ][i],
+                          ),
+                          avatar: CircleAvatar(
+                            backgroundColor: ExpressiveTheme.seeds[i],
+                            radius: 8,
+                          ),
+                          selected: presetIndex == i,
+                          onSelected: (_) => setting({'accent': i}),
+                        ),
+                    ],
+                  )
+                else if (colorSource == 'custom')
+                  OutlinedButton.icon(
+                    onPressed: chooseCustomColor,
+                    icon: const Icon(Icons.colorize),
+                    label: Text(ExpressiveTheme.hex(customColor ?? seed)),
+                  )
+                else if (wallpaperSeed == null)
+                  Text(
+                    t(
+                      backgroundVideo != null
+                          ? '没有可用的壁纸预览图，当前使用预设色。'
+                          : '未从背景取得有效颜色，当前使用预设色。',
+                      backgroundVideo != null
+                          ? 'No wallpaper preview is available; using the preset color.'
+                          : 'Using the preset until a background provides a usable color.',
+                    ),
+                  ),
+                const SizedBox(height: 16),
+                ExpansionTile(
+                  tilePadding: EdgeInsets.zero,
+                  childrenPadding: const EdgeInsets.only(bottom: 8),
+                  title: Text(t('更多配色设置', 'More color settings')),
+                  subtitle: Text(
+                    t('配色风格、导入导出和恢复默认', 'Palette, import, export and reset'),
+                  ),
+                  children: [
+                    Text(
+                      t('配色风格', 'Palette style'),
+                      style: appTheme.textTheme.titleMedium,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      t(
+                        '改变主题色的搭配方式。',
+                        'Changes how the theme combines colors.',
                       ),
                     ),
-                ],
-              ),
-            ),
-            const Divider(height: 32),
-            settingRow(
-              t('自定义背景', 'Custom background'),
-              t(
-                '使用本地图片作为背景，玻璃卡片也会使用这张图。',
-                'Use a local image for the workspace and glass cards.',
-              ),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  OutlinedButton.icon(
-                    onPressed: loadingBackground ? null : chooseBackground,
-                    icon: const Icon(Icons.image_outlined),
-                    label: Text(t('选择图片', 'Choose image')),
-                  ),
-                  TextButton(
-                    onPressed:
-                        loadingBackground || settings['backgroundImage'] == null
-                        ? null
-                        : () => loadBackground(null, save: true),
-                    child: Text(t('恢复默认', 'Restore default')),
-                  ),
-                ],
-              ),
-            ),
-            const Divider(height: 32),
-            settingRow(
-              t('语言', 'Language'),
-              t('同时支持中英文名称搜索', 'Search names in either language'),
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'zh', label: Text('中文')),
-                  ButtonSegment(value: 'en', label: Text('English')),
-                ],
-                selected: {en ? 'en' : 'zh'},
-                onSelectionChanged: (v) => setting({'language': v.first}),
-              ),
-            ),
-          ],
-        ),
-      ),
-      const SizedBox(height: 18),
-      glass(
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              t('卡片样式', 'Card style'),
-              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              t(
-                '选择卡片的背景效果。磨砂会模糊背景，液态玻璃带有折射，实色更清晰。',
-                'Frosted cards blur the background, liquid glass adds refraction, and solid cards improve contrast.',
-              ),
-            ),
-            const SizedBox(height: 20),
-            SegmentedButton<String>(
-              segments: [
-                ButtonSegment(
-                  value: 'frosted',
-                  icon: const Icon(Icons.blur_on),
-                  label: Text(t('磨砂', 'Frosted')),
-                ),
-                ButtonSegment(
-                  value: 'liquid',
-                  icon: const Icon(Icons.water_drop_outlined),
-                  label: Text(t('液态玻璃', 'Liquid')),
-                ),
-                ButtonSegment(
-                  value: 'solid',
-                  icon: const Icon(Icons.rectangle_outlined),
-                  label: Text(t('实色', 'Solid')),
-                ),
-              ],
-              selected: {settings['material'] ?? 'frosted'},
-              onSelectionChanged: (v) => setting({'material': v.first}),
-            ),
-            const SizedBox(height: 24),
-            Text(t('磨砂卡片遮挡背景的程度', 'Frosted background coverage')),
-            Slider(
-              value: (settings['opacity'] as num? ?? .76).toDouble(),
-              min: .2,
-              max: 1,
-              divisions: 80,
-              label: '${((settings['opacity'] as num? ?? .76) * 100).round()}%',
-              onChanged: (settings['material'] ?? 'frosted') == 'frosted'
-                  ? (v) => setting({'opacity': v})
-                  : null,
-            ),
-            Text(
-              t(
-                '向左可看见更多背景，向右文字更清楚。这个滑条用于磨砂样式。',
-                'Move left to reveal the background or right to improve text contrast. Applies to frosted cards.',
-              ),
-              style: const TextStyle(fontSize: 12),
-            ),
-          ],
-        ),
-      ),
-      const SizedBox(height: 18),
-      glass(
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              t('诊断与日志', 'Diagnostics & logs'),
-              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 16),
-            settingRow(
-              t('详细记录问题', 'Record troubleshooting details'),
-              t(
-                '记录启动、操作耗时与异常，便于排查卡顿或无法启动。',
-                'Records startup, operation timing and errors for troubleshooting.',
-              ),
-              Switch(
-                value: settings['diagnostics'] == true,
-                onChanged: (v) => setting({'diagnostics': v}),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              t(
-                '检查配置目录、程序文件完整性、证书与代理状态；不会自动启动代理或修改系统设置。日志不含账号、认证信息、请求正文、证书私钥或截图。',
-                'Checks profile access, application files, certificate and proxy status without starting the proxy or changing system settings. Logs exclude account data, credentials, request bodies, private keys and screenshots.',
-              ),
-            ),
-            const SizedBox(height: 18),
-            Wrap(
-              spacing: 12,
-              runSpacing: 12,
-              children: [
-                FilledButton.icon(
-                  onPressed: working ? null : runDiagnostics,
-                  icon: const Icon(Icons.fact_check_outlined),
-                  label: Text(t('运行诊断', 'Run diagnostics')),
-                ),
-                OutlinedButton.icon(
-                  onPressed: working ? null : exportDiagnostics,
-                  icon: const Icon(Icons.download),
-                  label: Text(t('导出诊断日志', 'Export diagnostic log')),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final (key, label) in [
+                          ('expressive', t('表现力', 'Expressive')),
+                          ('tonalSpot', t('柔和', 'Soft')),
+                          ('vibrant', t('鲜明', 'Vibrant')),
+                          ('fidelity', t('忠于原色', 'Faithful')),
+                          ('monochrome', t('单色', 'Monochrome')),
+                        ])
+                          ChoiceChip(
+                            avatar: paletteSwatch(key),
+                            label: Text(label),
+                            selected: palette == key,
+                            showCheckmark: false,
+                            onSelected: (selected) {
+                              if (selected) setting({'palette': key});
+                            },
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        for (final (label, fill, ink) in [
+                          (
+                            t('主要操作', 'Primary action'),
+                            appTheme.colorScheme.primary,
+                            appTheme.colorScheme.onPrimary,
+                          ),
+                          (
+                            t('已选项目', 'Selection'),
+                            appTheme.colorScheme.secondaryContainer,
+                            appTheme.colorScheme.onSecondaryContainer,
+                          ),
+                          (
+                            t('内容卡片', 'Card'),
+                            appTheme.colorScheme.surfaceContainerHigh,
+                            appTheme.colorScheme.onSurface,
+                          ),
+                        ])
+                          Chip(
+                            label: Text(label, style: TextStyle(color: ink)),
+                            backgroundColor: fill,
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        OutlinedButton.icon(
+                          onPressed: () => transferTheme(importing: true),
+                          icon: const Icon(Icons.file_open_outlined),
+                          label: Text(t('导入主题', 'Import theme')),
+                        ),
+                        TextButton.icon(
+                          onPressed: () => transferTheme(importing: false),
+                          icon: const Icon(Icons.ios_share),
+                          label: Text(t('导出主题', 'Export theme')),
+                        ),
+                        TextButton.icon(
+                          onPressed: () => setting({
+                            'theme': 'system',
+                            'accent': 0,
+                            'colorSource': 'preset',
+                            'palette': 'expressive',
+                            'customColor': ExpressiveTheme.hex(
+                              ExpressiveTheme.seeds.first,
+                            ),
+                            'customColorOpacity': 1.0,
+                            'material': 'frosted',
+                            'opacity': .76,
+                            'wallpaperOpacity': 1.0,
+                            'backgroundFit': 'cover',
+                            'backgroundX': 0.0,
+                            'backgroundY': 0.0,
+                            'backgroundBrightness': 1.0,
+                            'backgroundBlur': 0.0,
+                            'backgroundOverlay': 0.0,
+                            'backgroundOverlayColor': '#000000',
+                            'textScale': 1.0,
+                            'density': 'normal',
+                            'animations': true,
+                            'pauseVideoMinimized': true,
+                            'pauseVideoGame': true,
+                            'scheduledTheme': false,
+                            'dayHour': 7,
+                            'nightHour': 19,
+                          }),
+                          icon: const Icon(Icons.restart_alt),
+                          label: Text(t('恢复默认主题', 'Reset theme')),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
               ],
-            ),
-            const SizedBox(height: 12),
-            Text(
-              t(
-                '窗口无法打开时，可使用 --diagnostic 启动；启动错误始终记录。',
-                'If the window fails to open, launch with --diagnostic. Startup errors are always recorded.',
-              ),
-              style: const TextStyle(fontSize: 12),
-            ),
-          ],
-        ),
-      ),
-      const SizedBox(height: 18),
-      glass(
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              t('关于', 'About'),
-              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              '$title${currentVersion.isEmpty ? '' : ' · $currentVersion'}\n'
-              'Rust + Flutter · Morrow glass components\nAGPL-3.0-only',
-            ),
-            const SizedBox(height: 14),
-            Text('${t('作者', 'Author')}: 127MU'),
-            const SizedBox(height: 8),
-            SelectableText(projectUri.toString()),
-            const SizedBox(height: 12),
-            Wrap(
-              spacing: 12,
-              runSpacing: 10,
-              children: [
-                OutlinedButton(
-                  onPressed: () => openBrowser(projectUri),
-                  child: Text(t('打开项目仓库', 'Open repository')),
-                ),
-                FilledButton.icon(
-                  onPressed: checkingUpdates ? null : () => checkForUpdates(),
-                  icon: const Icon(Icons.download),
-                  label: Text(
-                    checkingUpdates
-                        ? t('正在检查更新…', 'Checking…')
-                        : t('检查更新', 'Check for updates'),
+              if (settingsCategory == 1) ...[
+                settingRow(
+                  t('自定义背景', 'Custom background'),
+                  t(
+                    '使用图片或静音循环视频作为背景。',
+                    'Use an image or a muted looping video as the background.',
+                  ),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        key: backgroundControl,
+                        onPressed: loadingBackground ? null : chooseBackground,
+                        icon: const Icon(Icons.image_outlined),
+                        label: Text(t('选择图片', 'Choose image')),
+                      ),
+                      if (Platform.isWindows) ...[
+                        OutlinedButton.icon(
+                          key: videoControl,
+                          onPressed: loadingBackground ? null : chooseVideo,
+                          icon: const Icon(Icons.video_file_outlined),
+                          label: Text(t('选择视频', 'Choose video')),
+                        ),
+                        OutlinedButton.icon(
+                          key: workshopControl,
+                          onPressed: loadingBackground
+                              ? null
+                              : () => chooseVideo(workshop: true),
+                          icon: const Icon(Icons.wallpaper_outlined),
+                          label: const Text('Wallpaper Engine'),
+                        ),
+                      ],
+                      TextButton(
+                        key: backgroundClearControl,
+                        onPressed:
+                            loadingBackground ||
+                                (settings['backgroundImage'] == null &&
+                                    settings['backgroundVideo'] == null)
+                            ? null
+                            : () => loadBackground(
+                                null,
+                                save: true,
+                                trigger: backgroundClearControl,
+                              ),
+                        child: Text(t('恢复默认', 'Restore default')),
+                      ),
+                    ],
                   ),
                 ),
+                const Divider(height: 32),
+                if (backgroundVideoError case final error?) Text(error),
+                if (backgroundVideo != null)
+                  Text(
+                    File(backgroundVideo!.dataSource).uri.pathSegments.last,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                if (backgroundImage != null || backgroundVideo != null) ...[
+                  Text(t('背景可见度', 'Background visibility')),
+                  Slider(
+                    value: wallpaperVisibility,
+                    label: '${(wallpaperVisibility * 100).round()}%',
+                    divisions: 20,
+                    onChanged: (value) => setting({'wallpaperOpacity': value}),
+                  ),
+                  const Divider(height: 32),
+                ],
               ],
-            ),
-            const SizedBox(height: 12),
-            Text(
-              t(
-                '每次启动自动检查；GitHub 无法访问时自动尝试两条镜像线路。',
-                'Checks at every launch and tries two mirror routes when GitHub cannot be reached.',
-              ),
-              style: const TextStyle(fontSize: 12),
-            ),
-            if (updateFailed)
+              if (settingsCategory == 0)
+                settingRow(
+                  t('语言', 'Language'),
+                  t('同时支持中英文名称搜索', 'Search names in either language'),
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'zh', label: Text('中文')),
+                      ButtonSegment(value: 'en', label: Text('English')),
+                    ],
+                    selected: {en ? 'en' : 'zh'},
+                    onSelectionChanged: (v) => setting({'language': v.first}),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      if (settingsCategory >= 1 && settingsCategory <= 3) ...[
+        const SizedBox(height: 18),
+        glass(
+          ThemePreferences(
+            section: settingsCategory,
+            settings: settings,
+            english: en,
+            change: (value) => setting(value),
+            savePreset: () => editPreset(),
+            applyPreset: (index) => applyPreset(index),
+            renamePreset: (index) => editPreset(index: index),
+            removePreset: (index) => removePreset(index),
+          ),
+        ),
+      ],
+      if (settingsCategory == 0) ...[
+        const SizedBox(height: 18),
+        glass(
+          ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            title: Text(t('卡片样式', 'Card style')),
+            subtitle: Text(t('调整背景透出程度', 'Adjust background visibility')),
+            children: [
+              const SizedBox(height: 12),
               Text(
                 t(
-                  '本次更新检查未成功，可点击重试。',
-                  'The last update check failed; you can retry.',
+                  '磨砂会模糊背景图片，实色卡片使用统一的主题底色。',
+                  'Frosted cards blur the background image. Solid cards use an opaque theme surface.',
+                ),
+              ),
+              const SizedBox(height: 20),
+              SegmentedButton<String>(
+                segments: [
+                  ButtonSegment(
+                    value: 'frosted',
+                    icon: const Icon(Icons.blur_on),
+                    label: Text(t('磨砂', 'Frosted')),
+                  ),
+                  ButtonSegment(
+                    value: 'solid',
+                    icon: const Icon(Icons.rectangle_outlined),
+                    label: Text(t('实色', 'Solid')),
+                  ),
+                ],
+                selected: {settings['material'] ?? 'frosted'},
+                onSelectionChanged: (v) => setting({'material': v.first}),
+              ),
+              const SizedBox(height: 24),
+              Text(t('磨砂卡片遮挡背景的程度', 'Frosted background coverage')),
+              const SizedBox(height: 10),
+              frostSample(),
+              Slider(
+                value:
+                    frostPreview ??
+                    (settings['opacity'] as num? ?? .76).toDouble(),
+                min: .2,
+                max: 1,
+                divisions: 80,
+                label:
+                    '${((frostPreview ?? (settings['opacity'] as num? ?? .76).toDouble()) * 100).round()}%',
+                onChanged: (settings['material'] ?? 'frosted') == 'frosted'
+                    ? (v) => setState(() => frostPreview = v)
+                    : null,
+                onChangeEnd: (settings['material'] ?? 'frosted') == 'frosted'
+                    ? (v) {
+                        frostPreview = null;
+                        setting({'opacity': v});
+                      }
+                    : null,
+              ),
+              Text(
+                t(
+                  '向左可看见更多背景，向右文字更清楚。这个滑条用于磨砂样式。',
+                  'Move left to reveal the background or right to improve text contrast. Applies to frosted cards.',
                 ),
                 style: const TextStyle(fontSize: 12),
               ),
-          ],
+            ],
+          ),
         ),
-      ),
-    ],
-  );
-  Widget settingRow(String title, String subtitle, Widget control) =>
-      LayoutBuilder(
-        builder: (context, c) => Wrap(
-          spacing: 24,
-          runSpacing: 16,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            SizedBox(
-              width: math.max(160, c.maxWidth - 420),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+      ],
+      if (settingsCategory == 4) ...[
+        const SizedBox(height: 18),
+        glass(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                t('诊断与日志', 'Diagnostics & logs'),
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 16),
+              settingRow(
+                t('详细记录问题', 'Record troubleshooting details'),
+                t(
+                  '记录启动、操作耗时与异常，便于排查卡顿或无法启动。',
+                  'Records startup, operation timing and errors for troubleshooting.',
+                ),
+                Switch(
+                  value: settings['diagnostics'] == true,
+                  onChanged: (v) => setting({'diagnostics': v}),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                t(
+                  '检查配置目录、程序文件完整性、证书与代理状态；不会自动启动代理或修改系统设置。日志不含账号、认证信息、请求正文、证书私钥或截图。',
+                  'Checks profile access, application files, certificate and proxy status without starting the proxy or changing system settings. Logs exclude account data, credentials, request bodies, private keys and screenshots.',
+                ),
+              ),
+              const SizedBox(height: 18),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
                 children: [
-                  Text(
-                    title,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  FilledButton.icon(
+                    onPressed: working ? null : runDiagnostics,
+                    icon: const Icon(Icons.fact_check_outlined),
+                    label: Text(t('运行诊断', 'Run diagnostics')),
                   ),
-                  const SizedBox(height: 5),
-                  Text(subtitle, style: const TextStyle(fontSize: 12)),
+                  OutlinedButton.icon(
+                    onPressed: working ? null : exportDiagnostics,
+                    icon: const Icon(Icons.download),
+                    label: Text(t('导出诊断日志', 'Export diagnostic log')),
+                  ),
                 ],
               ),
-            ),
-            control,
-          ],
+              const SizedBox(height: 12),
+              Text(
+                t(
+                  '窗口无法打开时，可使用 --diagnostic 启动；启动错误始终记录。',
+                  'If the window fails to open, launch with --diagnostic. Startup errors are always recorded.',
+                ),
+                style: const TextStyle(fontSize: 12),
+              ),
+            ],
+          ),
         ),
-      );
+      ],
+      if (settingsCategory == 5) ...[
+        const SizedBox(height: 18),
+        glass(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                t('关于', 'About'),
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                '$title${currentVersion.isEmpty ? '' : ' · $currentVersion'}\n'
+                'Rust + Flutter · Material 3 Expressive\nAGPL-3.0-only',
+              ),
+              const SizedBox(height: 14),
+              Text('${t('作者', 'Author')}: 127MU'),
+              const SizedBox(height: 8),
+              SelectableText(projectUri.toString()),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 10,
+                children: [
+                  OutlinedButton(
+                    onPressed: () => openBrowser(projectUri),
+                    child: Text(t('打开项目仓库', 'Open repository')),
+                  ),
+                  FilledButton.icon(
+                    onPressed: checkingUpdates ? null : () => checkForUpdates(),
+                    icon: const Icon(Icons.download),
+                    label: Text(
+                      checkingUpdates
+                          ? t('正在检查更新…', 'Checking…')
+                          : t('检查更新', 'Check for updates'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                t(
+                  '每次启动自动检查；GitHub 无法访问时自动尝试两条镜像线路。',
+                  'Checks at every launch and tries two mirror routes when GitHub cannot be reached.',
+                ),
+                style: const TextStyle(fontSize: 12),
+              ),
+              if (updateFailed)
+                Text(
+                  t(
+                    '本次更新检查未成功，可点击重试。',
+                    'The last update check failed; you can retry.',
+                  ),
+                  style: const TextStyle(fontSize: 12),
+                ),
+            ],
+          ),
+        ),
+      ],
+    ],
+  );
+  Widget frostSample() {
+    final colors = appTheme.colorScheme;
+    final solid = settings['material'] == 'solid';
+    final opacity =
+        frostPreview ?? (settings['opacity'] as num? ?? .76).toDouble();
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: Stack(
+        fit: StackFit.passthrough,
+        children: [
+          Positioned.fill(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [
+                    colors.primary,
+                    colors.tertiaryContainer,
+                    colors.tertiary,
+                  ],
+                ),
+              ),
+            ),
+          ),
+          DecoratedBox(
+            key: const ValueKey('frost-preview'),
+            decoration: BoxDecoration(
+              color: colors.surfaceContainer.withValues(
+                alpha: solid ? 1 : opacity,
+              ),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              child: Text(
+                t('卡片预览', 'Card preview'),
+                style: appTheme.textTheme.labelLarge,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget settingRow(String title, String subtitle, Widget control) {
+    final colors = appTheme.colorScheme;
+    final icon = switch (title) {
+      '颜色模式' || 'Color mode' => Icons.contrast,
+      '取色来源' || 'Color source' => Icons.palette_outlined,
+      '自定义背景' || 'Custom background' => Icons.wallpaper_outlined,
+      '语言' || 'Language' => Icons.language,
+      _ => Icons.tune,
+    };
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow.withValues(alpha: .8),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: .45)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        child: LayoutBuilder(
+          builder: (context, c) {
+            final description = Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(icon, size: 22, color: colors.onSurfaceVariant),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      const SizedBox(height: 5),
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: colors.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+            if (c.maxWidth < 520) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [description, const SizedBox(height: 12), control],
+              );
+            }
+            return Row(
+              children: [
+                Expanded(child: description),
+                const SizedBox(width: 24),
+                Flexible(child: control),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
 }
 
 class _InventoryPage extends StatefulWidget {
@@ -2067,12 +3401,14 @@ class _InventoryPage extends StatefulWidget {
     required this.english,
     required this.proxyState,
     required this.surface,
+    required this.heading,
   });
 
   final CpvApi core;
   final bool english;
   final Json proxyState;
   final Widget Function(Widget) surface;
+  final Widget Function(String, String, List<Widget>) heading;
 
   @override
   State<_InventoryPage> createState() => _InventoryPageState();
@@ -2594,9 +3930,13 @@ class _InventoryPageState extends State<_InventoryPage> {
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.only(bottom: 20),
     children: [
-      Text(
+      widget.heading(
         t('军械库', 'Armory'),
-        style: Theme.of(context).textTheme.headlineMedium,
+        t(
+          '管理武器、战备和配件的本地预览。',
+          'Manage local previews for weapons, stratagems and attachments.',
+        ),
+        [],
       ),
       const SizedBox(height: 14),
       widget.surface(
@@ -2732,21 +4072,29 @@ class _InventoryPageState extends State<_InventoryPage> {
               ],
             ),
             const SizedBox(height: 16),
-            TextField(
-              controller: add,
-              enabled: loaded && !busy,
-              onChanged: (_) => setState(() {}),
-              decoration: InputDecoration(
-                labelText: t('预览拥有的物品 ID', 'Preview item IDs'),
-                hintText: t(
-                  '逗号或空格分隔，可输入 0x 十六进制',
-                  'Comma or space separated. 0x hex accepted.',
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: add,
+                    enabled: loaded && !busy,
+                    onChanged: (_) => setState(() {}),
+                    decoration: InputDecoration(
+                      labelText: t('预览拥有的物品 ID', 'Preview item IDs'),
+                      hintText: t(
+                        '逗号或空格分隔，可输入 0x 十六进制',
+                        'Comma or space separated. 0x hex accepted.',
+                      ),
+                    ),
+                  ),
                 ),
-                suffixIcon: TextButton(
+                const SizedBox(width: 8),
+                FilledButton.tonalIcon(
                   onPressed: loaded && !busy ? chooseWeapon : null,
-                  child: Text(t('选武器', 'Pick weapon')),
+                  icon: const Icon(Icons.add),
+                  label: Text(t('选武器', 'Pick weapon')),
                 ),
-              ),
+              ],
             ),
             if (selectedWeapons(add.text).isNotEmpty)
               Padding(
@@ -3071,9 +4419,9 @@ class _EffectLibraryState extends State<EffectLibrary> {
               return Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: Material(
-                  color: Theme.of(
-                    context,
-                  ).colorScheme.surface.withValues(alpha: .76),
+                  color: widget.selected.contains(id)
+                      ? Theme.of(context).colorScheme.secondaryContainer
+                      : Theme.of(context).colorScheme.surfaceContainerLow,
                   borderRadius: BorderRadius.circular(16),
                   child: ListTile(
                     contentPadding: const EdgeInsets.symmetric(
@@ -3097,22 +4445,13 @@ class _EffectLibraryState extends State<EffectLibrary> {
                       '#$id  ·  ${groups[row['groupKey']]?[widget.en ? 1 : 0] ?? row['groupKey']}${row['experimental'] == true ? '  ·  ${widget.en ? 'Experimental' : '实验性'}' : ''}',
                       style: const TextStyle(fontSize: 12),
                     ),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.info_outline),
+                      tooltip: widget.en ? 'View details' : '查看详情',
+                      onPressed: () => showEffectDetails(row),
+                    ),
                     onTap: widget.onToggle == null
-                        ? () => showDialog<void>(
-                            context: context,
-                            builder: (context) => AlertDialog(
-                              title: Text(recordName(row, widget.en)),
-                              content: SelectableText(
-                                '#$id\n${row['description'] ?? row['reference_note'] ?? ''}\n\n${widget.en ? 'A catalog entry does not guarantee in-game compatibility.' : '目录候选不等于已验证可用。'}',
-                              ),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.pop(context),
-                                  child: Text(widget.en ? 'Close' : '关闭'),
-                                ),
-                              ],
-                            ),
-                          )
+                        ? () => showEffectDetails(row)
                         : () => widget.onToggle!(id),
                   ),
                 ),
@@ -3121,6 +4460,46 @@ class _EffectLibraryState extends State<EffectLibrary> {
           ),
         ),
       ],
+    );
+  }
+
+  Future<void> showEffectDetails(Json row) {
+    final en = widget.en;
+    final temporary = row['effectType'] == 32;
+    final description =
+        row['stratagemDetails']?[en ? 'en' : 'zh'] ??
+        (en
+            ? row['englishDescription']
+            : row['description'] ?? row['reference_note']);
+    final paragraphs = [
+      '#${row['id']}',
+      if (description is String && description.trim().isNotEmpty) description,
+      if (temporary) ...[
+        en
+            ? 'How to use\nSelect this effect in a planet plan, then save the plan. The game can offer the stratagem as a temporary option when war status refreshes.'
+            : '使用方法\n在星球方案的“效果”中勾选此项并保存。游戏刷新战况后，可用的战备会作为临时选项出现。',
+        en
+            ? 'The game limits how many temporary stratagems can be used at once. Extra selections may not appear.'
+            : '游戏限制同时可用的临时战备数量。选得太多时，部分战备可能不会出现。',
+      ],
+      if (row['experimental'] == true)
+        en
+            ? 'In-game availability still needs verification.'
+            : '此条目仍需验证在游戏中是否可用。',
+    ];
+    return showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        scrollable: true,
+        title: Text(recordName(row, en)),
+        content: SelectableText(paragraphs.join('\n\n')),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: Text(en ? 'Close' : '关闭'),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -3132,11 +4511,15 @@ class PlanetEditor extends StatefulWidget {
     required this.effects,
     required this.planets,
     required this.en,
+    this.frosted = false,
+    this.frostOpacity = .76,
     this.onSave,
   });
   final Json target;
   final List<Json> effects, planets;
   final bool en;
+  final bool frosted;
+  final double frostOpacity;
   final Future<void> Function(Json)? onSave;
   @override
   State<PlanetEditor> createState() => _PlanetEditorState();
@@ -3171,155 +4554,182 @@ class _PlanetEditorState extends State<PlanetEditor> {
   @override
   Widget build(BuildContext context) {
     final p = widget.planets.where((p) => p['id'] == draft['planet']);
-    return Material(
-      borderRadius: BorderRadius.circular(26),
-      clipBehavior: Clip.antiAlias,
-      color: Theme.of(context).colorScheme.surface,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(24),
-            child: Row(
+    return EditorDismissMotion(
+      enabled: !saving,
+      builder: (context, dragHeader) => ClipRRect(
+        borderRadius: BorderRadius.circular(ExpressiveTheme.panelRadius),
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(
+            sigmaX: widget.frosted ? 14 : 0,
+            sigmaY: widget.frosted ? 14 : 0,
+          ),
+          child: Material(
+            borderRadius: BorderRadius.circular(ExpressiveTheme.panelRadius),
+            clipBehavior: Clip.antiAlias,
+            color: Theme.of(context).colorScheme.surfaceContainerHigh
+                .withValues(alpha: widget.frosted ? widget.frostOpacity : 1),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        t('星球方案', 'Planet plan'),
-                        style: Theme.of(context).textTheme.labelMedium,
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        p.isEmpty
-                            ? '#${draft['planet']}'
-                            : recordName(p.first, widget.en),
-                        style: const TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.w700,
+                dragHeader(
+                  Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                t('星球方案', 'Planet plan'),
+                                style: Theme.of(context).textTheme.labelMedium,
+                              ),
+                              const SizedBox(height: 6),
+                              Text(
+                                p.isEmpty
+                                    ? '#${draft['planet']}'
+                                    : recordName(p.first, widget.en),
+                                style: const TextStyle(
+                                  fontSize: 24,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
+                        IconButton(
+                          onPressed: saving
+                              ? null
+                              : () => Navigator.pop(context),
+                          tooltip: t('放弃本次修改', 'Discard changes'),
+                          icon: const Icon(Icons.close),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 24),
+                  child: LiquidTabs(
+                    labels: [
+                      t('效果', 'Effects'),
+                      t('星球设置', 'Planet settings'),
+                      t('天气', 'Weather'),
+                    ],
+                    selected: tab,
+                    onSelected: (index) => setState(() => tab = index),
+                  ),
+                ),
+                const SizedBox(height: 18),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 24),
+                    child: MotionEntrance(
+                      key: ValueKey('editor-tab-motion-$tab'),
+                      child: switch (tab) {
+                        0 => EffectLibrary(
+                          effects: widget.effects,
+                          en: widget.en,
+                          selected: selected,
+                          onToggle: toggle,
+                        ),
+                        1 => operations(),
+                        _ => weather(),
+                      },
+                    ),
+                  ),
+                ),
+                const Divider(height: 1),
+                if (widget.effects
+                        .where(
+                          (e) =>
+                              e['effectType'] == 32 &&
+                              selected.contains(e['id']),
+                        )
+                        .length >
+                    1)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
+                    child: Text(
+                      t(
+                        '游戏内的临时配发战备有数量限制，超出时可能无法正常使用。',
+                        'The game limits temporary stratagems. Extra selections may not work in-game.',
+                      ),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ),
+                if (saveError != null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 24,
+                      vertical: 8,
+                    ),
+                    child: Text(
+                      saveError!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ),
+                Padding(
+                  padding: const EdgeInsets.all(20),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '${selected.length} / 32  ${t('个效果', 'effects')}',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: saving ? null : () => Navigator.pop(context),
+                        child: Text(t('取消', 'Cancel')),
+                      ),
+                      const SizedBox(width: 12),
+                      FilledButton.icon(
+                        onPressed: saving
+                            ? null
+                            : () async {
+                                if (operationMode == 4 &&
+                                    (draft['defense_source'] as num? ?? -1) <
+                                        0) {
+                                  setState(
+                                    () => saveError = t(
+                                      '请选择发起进攻的星球。',
+                                      'Choose the planet launching the attack.',
+                                    ),
+                                  );
+                                  return;
+                                }
+                                draft['effects'] = selected.toList();
+                                setState(() {
+                                  saving = true;
+                                  saveError = null;
+                                });
+                                try {
+                                  await widget.onSave?.call(draft);
+                                  if (context.mounted) {
+                                    Navigator.pop(context, draft);
+                                  }
+                                } catch (e) {
+                                  if (mounted) {
+                                    setState(() {
+                                      saving = false;
+                                      saveError = e.toString();
+                                    });
+                                  }
+                                }
+                              },
+                        icon: const Icon(Icons.check, size: 18),
+                        label: Text(t('保存方案', 'Save plan')),
                       ),
                     ],
                   ),
                 ),
-                IconButton(
-                  onPressed: () => Navigator.pop(context),
-                  tooltip: t('放弃本次修改', 'Discard changes'),
-                  icon: const Icon(Icons.close),
-                ),
               ],
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
-            child: SegmentedButton<int>(
-              segments: [
-                ButtonSegment(value: 0, label: Text(t('效果', 'Effects'))),
-                ButtonSegment(
-                  value: 1,
-                  label: Text(t('星球设置', 'Planet settings')),
-                ),
-                ButtonSegment(value: 2, label: Text(t('天气', 'Weather'))),
-              ],
-              selected: {tab},
-              onSelectionChanged: (v) => setState(() => tab = v.first),
-            ),
-          ),
-          const SizedBox(height: 18),
-          Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: switch (tab) {
-                0 => EffectLibrary(
-                  effects: widget.effects,
-                  en: widget.en,
-                  selected: selected,
-                  onToggle: toggle,
-                ),
-                1 => operations(),
-                _ => weather(),
-              },
-            ),
-          ),
-          const Divider(height: 1),
-          if (widget.effects
-                  .where(
-                    (e) => e['effectType'] == 32 && selected.contains(e['id']),
-                  )
-                  .length >
-              1)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(24, 12, 24, 0),
-              child: Text(
-                t(
-                  '游戏内的临时配发战备有数量限制，超出时可能无法正常使用。',
-                  'The game limits temporary stratagems. Extra selections may not work in-game.',
-                ),
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ),
-          if (saveError != null)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 8),
-              child: Text(
-                saveError!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            ),
-          Padding(
-            padding: const EdgeInsets.all(20),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    '${selected.length} / 32  ${t('个效果', 'effects')}',
-                    style: const TextStyle(fontSize: 12),
-                  ),
-                ),
-                TextButton(
-                  onPressed: saving ? null : () => Navigator.pop(context),
-                  child: Text(t('取消', 'Cancel')),
-                ),
-                const SizedBox(width: 12),
-                FilledButton.icon(
-                  onPressed: saving
-                      ? null
-                      : () async {
-                          if (operationMode == 4 &&
-                              (draft['defense_source'] as num? ?? -1) < 0) {
-                            setState(
-                              () => saveError = t(
-                                '请选择发起进攻的星球。',
-                                'Choose the planet launching the attack.',
-                              ),
-                            );
-                            return;
-                          }
-                          draft['effects'] = selected.toList();
-                          setState(() {
-                            saving = true;
-                            saveError = null;
-                          });
-                          try {
-                            await widget.onSave?.call(draft);
-                            if (context.mounted) Navigator.pop(context, draft);
-                          } catch (e) {
-                            if (mounted) {
-                              setState(() {
-                                saving = false;
-                                saveError = e.toString();
-                              });
-                            }
-                          }
-                        },
-                  icon: const Icon(Icons.check, size: 18),
-                  label: Text(t('保存方案', 'Save plan')),
-                ),
-              ],
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -3463,7 +4873,7 @@ class _PlanetEditorState extends State<PlanetEditor> {
                 if (race == 1) (1, t('沿用旧设置', 'Keep legacy setting')),
                 (2, t('终结族', 'Terminids')),
                 (3, t('机器人', 'Automatons')),
-                (4, t('光能族', 'Illuminate')),
+                (4, t('光能者', 'Illuminate')),
               ])
                 ChoiceChip(
                   label: Text(item.$2),
@@ -3573,7 +4983,7 @@ class _PlanetEditorState extends State<PlanetEditor> {
           t('超级地球', 'Super Earth'),
           t('终结族', 'Terminids'),
           t('机器人', 'Automatons'),
-          t('光能族', 'Illuminate'),
+          t('光能者', 'Illuminate'),
         ],
         hint: t(
           '选择超级地球或敌人控制这颗星球。“保留原样”不修改控制方。',
@@ -3608,15 +5018,15 @@ class _PlanetEditorState extends State<PlanetEditor> {
         'campaign_type',
         t('特殊作战', 'Special operations'),
         [
-          t('普通解放', 'Standard liberation'),
-          t('侦察战役', 'Recon campaign'),
-          t('高优先级战役', 'High-priority campaign'),
+          t('普通作战', 'Standard operations'),
+          t('侦察作战', 'Recon operations'),
+          t('高优先级作战', 'High-priority operations'),
           t('城市作战', 'City operations'),
           t('防守（实验性）', 'Defense (experimental)'),
         ],
         hint: t(
-          '需要侦察或高优先级作战时再改。不确定时选普通解放。',
-          'Change only if you want recon or high-priority operations. Otherwise use standard liberation.',
+          '需要侦察或高优先级作战时再改。不确定时选普通作战。',
+          'Change only if you want recon or high-priority operations. Otherwise choose standard operations.',
         ),
       ),
       if (draft['campaign'] == true || draft['force_open'] == true)

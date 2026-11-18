@@ -10,7 +10,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
-pub const VERSION: &str = "2.0.2";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub fn stamp() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
